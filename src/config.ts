@@ -93,7 +93,7 @@ export const DEFAULT_SETTINGS: Settings = {
   clouds: 'wispy',
   birds: 'few',
   moon: 'crescent',
-  pace: 'medium',
+  pace: 'fast',
   seed: 1,
 };
 
