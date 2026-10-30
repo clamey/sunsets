@@ -190,7 +190,6 @@ export class Ocean {
         ${NOISE_GLSL}
         ${SHORE_GLSL}
         ${OCEAN_GLSL}
-        uniform sampler2D uFoamTex;
         uniform float uSunVis;
         varying vec3 vWorld;
         varying vec2 vRest;
@@ -208,6 +207,7 @@ export class Ocean {
           vec3 V = toCam / dist;
           // A pixel covers a long stretch of sea at grazing angles: filter by that length.
           OceanSample o = oceanAt(vRest, dist * 0.0012 / max(V.y, 0.04), true);
+          if (o.cover < 0.01) discard;
           vec3 N = o.normal;
           float uF = offshore(vRest);
           float filmThick = max(vWorld.y - sandHeight(uF), 0.0);
@@ -253,20 +253,30 @@ export class Ocean {
 
           // Whitewater: lacy foam advected with the surface.
           float foamAmt = o.foam;
-          foamAmt = max(foamAmt, smoothstep(0.08, 0.0, thick) * step(u, 2.0) * smoothstep(0.0, 0.02, thick) * 0.9);
           vec2 fuv = vRest + vec2(0.0, o.disp.z * 0.5);
           float lace = textureLod(uFoamTex, fuv / 9.0, 0.0).g * 0.6 + textureLod(uFoamTex, fuv / 3.1 + 0.3, 0.0).g * 0.4;
           lace = clamp((lace - 0.3) / 0.45, 0.0, 1.0);
           // Large holes and patches so foam fields aren't uniform.
           float patches = clamp((textureLod(uFoamTex, fuv / 40.0 + 0.7, 0.0).g - 0.3) / 0.45, 0.0, 1.0);
           foamAmt = clamp(foamAmt * (0.55 + 0.7 * patches) * 1.7, 0.0, 1.0);
-          float foam = smoothstep(1.0 - foamAmt - 0.15, 1.0 - foamAmt + 0.15, lace) * smoothstep(0.03, 0.2, foamAmt);
+          // Fresh whitewater is solid; as it ages it thins into a web of filaments
+          // (contour lines of noise), the marbled lace you see behind breaking waves.
+          float solid = smoothstep(1.0 - foamAmt - 0.15, 1.0 - foamAmt + 0.15, lace) * smoothstep(0.45, 0.85, foamAmt);
+          float n1 = textureLod(uFoamTex, fuv / 6.5 + 0.13, 0.0).r;
+          float n2 = textureLod(uFoamTex, fuv / 2.2 + 0.57, 0.0).b;
+          float w = 0.03 + 0.12 * foamAmt;
+          float web = max(1.0 - smoothstep(0.0, w, abs(n1 - 0.5)),
+                          0.6 * smoothstep(0.35, 0.7, foamAmt) * (1.0 - smoothstep(0.0, w * 0.6, abs(n2 - 0.5))));
+          float foam = max(solid, web * smoothstep(0.12, 0.35, foamAmt));
+          // Far away the pattern is finer than a pixel: show its average instead.
+          foam = mix(foam, foamAmt * 0.55, smoothstep(40.0, 160.0, dist));
           foam *= 1.0 - smoothstep(500.0, 2500.0, dist) * 0.7;
           float ndl = max(dot(N, uSunDir), 0.0);
           vec3 foamCol = vec3(0.85) * (uSunColor * uSunVis * (ndl * 0.6 + 0.2) + amb);
           col = mix(col, foamCol, foam);
           alpha = max(alpha, foam);
 
+          alpha *= o.cover;
           col = applyAtmosphere(col, vWorld);
           gl_FragColor = vec4(col * uExposure * alpha, alpha);
         }`,
@@ -322,6 +332,7 @@ uniform vec4 uSwell[${N_SWELL}]; // omega, alongshore k, phase, deep onshore k
 uniform vec4 uWind[${N_WIND}];   // dir x, dir z, k, amplitude
 uniform float uWindPhase[${N_WIND}];
 uniform vec4 uSea;              // swell Hs, wind Hs, whitecaps, period
+uniform sampler2D uFoamTex;     // tiling noise (also used for foam lace)
 
 struct OceanSample {
   vec3 disp;
@@ -329,6 +340,7 @@ struct OceanSample {
   float crest;    // height relative to local wave height, ~0..1 near crests
   float foam;     // whitewater amount 0..1
   float slopeVar; // slope variance of waves too small to resolve
+  float cover;    // 0 where the swash film hasn't reached (soft edge, per pixel)
 };
 
 vec4 tableAt(int row, float u) {
@@ -412,17 +424,37 @@ OceanSample oceanAt(vec2 xz, float footprint, bool full) {
   }
 
   // Swash: after each wave reaches the beach, a thin sheet runs up the sand and back.
+  float swashFoam = 0.0;
+  float cover = 1.0;
   if (u < 8.0) {
     float thS = uSwell[2].y * xz.x - uSwell[2].x * uTime + uSwell[2].z;
-    float psi = fract((1.5708 - thS) / 6.2832);
+    // Continuous count of waves arriving: noise sampled along it changes from one
+    // swash to the next, and along the beach, without popping.
+    float waveNo = (1.5708 - thS) / 6.2832;
+    vec4 nA = textureLod(uFoamTex, vec2(xz.x / 70.0 + waveNo * 0.618, waveNo * 0.37), 0.0);
+    vec4 nB = textureLod(uFoamTex, vec2(xz.x / 17.0 - waveNo * 0.41, 0.53 + waveNo * 0.29), 0.0);
+    // Different stretches of beach are reached at slightly different moments...
+    float psi = fract(waveNo + (nA.r - 0.5) * 0.12);
     float group = 0.65 + 0.35 * sin(uSwell[4].y * xz.x * 0.5 - (uSwell[4].x - uSwell[2].x) * uTime + 1.3);
     float rise = psi < 0.3 ? sin(psi / 0.3 * 1.5708) : (psi < 0.92 ? pow(1.0 - (psi - 0.3) / 0.62, 1.6) : 0.0);
+    // ...and run up different distances: broad lobes, narrower tongues, and the
+    // scalloped rhythm of beach cusps.
+    float lobes = 0.45 + 0.85 * clamp((nA.g - 0.3) / 0.45, 0.0, 1.0);
+    float tongues = 0.8 + 0.4 * clamp((nB.g - 0.3) / 0.45, 0.0, 1.0);
+    float cusps = 1.0 + 0.14 * sin(xz.x * 6.2832 / 26.0 + 1.7 + 0.6 * sin(xz.x / 61.0));
     // A thin film hugging the sloping sand, thinning to nothing at its leading edge.
-    float reach = uShoreC.z * group * rise / uShoreB.w;
+    float reach = uShoreC.z * group * rise * lobes * tongues * cusps / uShoreB.w;
     if (u < 0.0) {
       float frac = -u / max(reach, 0.01);
-      float film = frac < 1.0 ? (0.015 + uShoreC.z * 0.12 * pow(1.0 - frac, 0.8)) : -0.08;
+      // The film always sits just above the sand; its edge is cut per pixel (cover)
+      // so the outline follows the lobes smoothly instead of the mesh rows.
+      float film = 0.02 + (frac < 1.0 ? uShoreC.z * 0.12 * pow(1.0 - frac, 0.8) : 0.0);
       disp = vec3(0.0, sandHeight(u) + film, 0.0);
+      cover = 1.0 - smoothstep(0.96, 1.0, frac);
+      if (u < -60.0) disp.y = -3.0;
+      // Bubbly foam front on the way up; a ragged, thinner fringe as it drains back.
+      bool up = psi < 0.3;
+      swashFoam = frac < 1.0 ? (up ? smoothstep(0.55, 0.97, frac) : smoothstep(0.75, 1.0, frac) * 0.55 * nB.b) : 0.0;
     } else {
       disp.y = max(disp.y, uShoreC.z * 0.12 * group * rise * (1.0 - smoothstep(0.0, 8.0, u)));
     }
@@ -432,6 +464,7 @@ OceanSample oceanAt(vec2 xz, float footprint, bool full) {
   o.normal = normalize(cross(dz, dx));
   o.crest = localH > 1e-3 ? swellY / localH + 0.3 : 0.0;
   o.slopeVar = var;
+  o.cover = cover;
   o.foam = 0.0;
   if (full) {
     // Whitewater: on breaking crests, trailing behind them through the surf zone,
@@ -442,10 +475,14 @@ OceanSample oceanAt(vec2 xz, float footprint, bool full) {
     float sect = 0.3 + 0.7 * smoothstep(0.3, 0.75, group);
     float sinceCrest = fract((1.5708 - mainPhase) / 6.2832);
     float crestNorm = sumA > 1e-4 ? swellY / sumA : 0.0;
-    float crestFoam = summ.x * smoothstep(0.2, 0.6, crestNorm) * sect * 1.3;
-    float trail = summ.y * (exp(-sinceCrest * 2.2) * sect + 0.22);
+    // Each broken wave's whitewater comes in sections that differ from wave to wave.
+    float waveNo = (1.5708 - mainPhase) / 6.2832;
+    vec4 bn = textureLod(uFoamTex, vec2(xz.x / 45.0 + floor(waveNo) * 0.37, floor(waveNo) * 0.61 + 0.2), 0.0);
+    float sections = mix(0.12, 1.0, smoothstep(0.35, 0.62, bn.g * 0.7 + bn.r * 0.5 - 0.1));
+    float crestFoam = summ.x * smoothstep(0.2, 0.6, crestNorm) * sect * 1.3 * sections;
+    float trail = summ.y * (exp(-sinceCrest * 2.2) * sect * sections + 0.16);
     float caps = uSea.z * smoothstep(0.75, 1.0, disp.y / max(uSea.y, 0.05)) * smoothstep(5.0, 20.0, depth);
-    o.foam = clamp(max(max(crestFoam, trail), caps), 0.0, 1.0) * step(0.0, u + 1.0);
+    o.foam = max(clamp(max(max(crestFoam, trail), caps), 0.0, 1.0) * step(0.0, u + 1.0), swashFoam);
   }
   return o;
 }
