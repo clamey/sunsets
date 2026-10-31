@@ -63,7 +63,7 @@ export function makeClouds(style: CloudStyle, rng: Rng): CloudLayer[] {
     base: range(rng, 3.6, 5),
     thickness: range(rng, 0.25, 0.45),
     coverage: cov,
-    sigma: 22,
+    sigma: 14,
     scale: range(rng, 0.55, 0.9),
     gap: 0,
     erode: 0.4,

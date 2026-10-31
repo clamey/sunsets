@@ -254,16 +254,24 @@ export class Ocean {
           // Whitewater: lacy foam advected with the surface.
           float foamAmt = o.foam;
           vec2 fuv = vRest + vec2(0.0, o.disp.z * 0.5);
-          float lace = textureLod(uFoamTex, fuv / 9.0, 0.0).g * 0.6 + textureLod(uFoamTex, fuv / 3.1 + 0.3, 0.0).g * 0.4;
+          // The noise texture tiles every unit, so warp it with non-repeating noise and
+          // give each lookup its own rotation; otherwise the foam shows a grid.
+          // Warps tile at 211 m and 37 m, both rotated, so nothing lines up nearby.
+          const mat2 R1 = mat2(0.866, 0.5, -0.5, 0.866);
+          const mat2 R2 = mat2(0.309, -0.951, 0.951, 0.309);
+          const mat2 R3 = mat2(-0.643, 0.766, -0.766, -0.643);
+          fuv += (textureLod(uFoamTex, R3 * fuv / 211.0 + 0.41, 0.0).rb - 0.5) * 30.0;
+          fuv += (textureLod(uFoamTex, R2 * fuv / 37.0 + 0.77, 0.0).br - 0.5) * 5.0;
+          float lace = textureLod(uFoamTex, R1 * fuv / 9.0, 0.0).g * 0.6 + textureLod(uFoamTex, R2 * fuv / 3.1 + 0.3, 0.0).g * 0.4;
           lace = clamp((lace - 0.3) / 0.45, 0.0, 1.0);
           // Large holes and patches so foam fields aren't uniform.
-          float patches = clamp((textureLod(uFoamTex, fuv / 40.0 + 0.7, 0.0).g - 0.3) / 0.45, 0.0, 1.0);
+          float patches = clamp((textureLod(uFoamTex, R1 * fuv / 97.0 + 0.7, 0.0).g - 0.3) / 0.45, 0.0, 1.0);
           foamAmt = clamp(foamAmt * (0.55 + 0.7 * patches) * 1.7, 0.0, 1.0);
           // Fresh whitewater is solid; as it ages it thins into a web of filaments
           // (contour lines of noise), the marbled lace you see behind breaking waves.
           float solid = smoothstep(1.0 - foamAmt - 0.15, 1.0 - foamAmt + 0.15, lace) * smoothstep(0.45, 0.85, foamAmt);
-          float n1 = textureLod(uFoamTex, fuv / 6.5 + 0.13, 0.0).r;
-          float n2 = textureLod(uFoamTex, fuv / 2.2 + 0.57, 0.0).b;
+          float n1 = textureLod(uFoamTex, R3 * fuv / 6.5 + 0.13, 0.0).r;
+          float n2 = textureLod(uFoamTex, R1 * R2 * fuv / 2.2 + 0.57, 0.0).b;
           float w = 0.03 + 0.12 * foamAmt;
           float web = max(1.0 - smoothstep(0.0, w, abs(n1 - 0.5)),
                           0.6 * smoothstep(0.35, 0.7, foamAmt) * (1.0 - smoothstep(0.0, w * 0.6, abs(n2 - 0.5))));

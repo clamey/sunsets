@@ -20,6 +20,7 @@ precision highp sampler3D;
 uniform sampler2D uNoise2D;
 uniform sampler3D uNoise3D;
 uniform vec2 uTanHalf;
+uniform float uPixAng;
 uniform mat3 uCamRot;
 uniform float uCamAlt;
 uniform vec2 uSunAz;
@@ -46,12 +47,19 @@ float coverageAt(vec2 w, vec4 A, vec4 B, vec4 C) {
     vec4 b = n2(mat2(0.8, -0.6, 0.6, 0.8) * uv * 0.31 + 0.31 - ev * 0.4);
     c = a.g * 0.6 + a.r * 0.3 + (b.r - 0.5) * 0.7 + 0.05;
   } else if (B.x < 2.5) {
-    // Cloudlets in loose rows across the wind, clumped into patches.
-    vec2 u2 = vec2(uv.x, uv.y * 1.6) * 2.0;
-    u2 += (n2(uv * 0.7 + ev).rb - 0.5) * 0.35;
+    // Billows: cloudlets drawn out across the wind and lined up in wavering rows that
+    // break and merge, clumped into patches.
+    // The noise tile repeats every unit, so the cells are warped by a much larger field
+    // and the rows' spacing wanders with it.
+    vec2 big = n2(mat2(0.6, 0.8, -0.8, 0.6) * uv * 0.071 + 0.23).rb - 0.5;
+    vec2 wob = n2(uv * 0.5 + ev).rb - 0.5;
+    vec2 u2 = vec2(uv.x * 3.2, uv.y * 1.4) + wob * 0.5 + big * 4.0;
     vec4 a = n2(u2 + ev);
-    vec4 b = n2(uv * 0.22 - ev * 0.3 + 0.5);
-    c = (a.g * 0.6 + a.r * 0.5 - 0.05) * mix(0.45, 1.15, smoothstep(0.3, 0.65, b.r));
+    float cells = a.g;
+    float rows = 0.5 + 0.5 * sin((uv.x * 9.0 + wob.y * 2.5 + big.x * 14.0) * 6.2832);
+    rows = mix(0.5, rows, smoothstep(-0.15, 0.2, big.y));
+    vec4 b = n2(uv * 0.22 - ev * 0.3 + 0.5 + big * 0.8);
+    c = (cells * 0.8 + a.r * 0.15 + rows * 0.3 - 0.17) * mix(0.45, 1.15, smoothstep(0.3, 0.65, b.r));
   } else {
     // Stratocumulus deck: lumpy cells with thin spots and the odd gap.
     vec2 u2 = uv * 2.2 + (n2(uv * 0.6 + ev).rb - 0.5) * 0.3;
@@ -72,12 +80,26 @@ float density(vec3 p, float h, vec4 A, vec4 B, vec4 C, bool detail) {
     base *= 1.0 - smoothstep(B.z * 0.75, B.z, along);
   }
   if (base <= 0.0) return 0.0;
-  float prof;
   if (B.x < 0.5) {
-    // Flat bases, domed tops: stronger coverage builds taller heaps.
-    float top = 0.2 + 0.8 * pow(base, 0.65);
-    prof = smoothstep(0.0, 0.06, hf) * (1.0 - smoothstep(top * 0.7, top, hf));
-  } else if (B.x < 2.5) {
+    // Cumulus: the surface is a level set of 3D noise, so each cloud is a heap of
+    // rounded lumps. Coverage and height only set the threshold; a coarse 2D field
+    // gives neighbouring clouds different heights.
+    float topN = n2(w / (B.y * 8.0) * 0.45 + 0.17).b;
+    float top = mix(0.3, 1.0, sat((topN - 0.35) * 2.6)) * (0.55 + 0.45 * base);
+    float hg = smoothstep(0.0, 0.05, hf) * pow(sat((top - hf) / (top * 0.8)), 0.6);
+    float k = sat(base * 2.2) * hg;
+    if (k <= 0.0) return 0.0;
+    vec3 sp = vec3(w.x, h, w.y) / (B.y * 1.5) + vec3(C.z * 3.0, C.z * 1.5, C.z * 2.0);
+    float shape = textureLod(uNoise3D, sp, 0.0).r;
+    float d = sat((shape - (1.0 - k)) / k);
+    if (d <= 0.0 || !detail) return d * 1.8;
+    // Small billows roughen the lumps; ragged and wispy near the base.
+    float small = textureLod(uNoise3D, sp * 3.7 + 0.37, 0.0).r;
+    float e = B.w * 0.4 * (1.0 - small) * mix(1.4, 0.8, sat(hf * 3.0));
+    return sat((d - e) / max(1.0 - e, 0.05)) * 1.8;
+  }
+  float prof;
+  if (B.x < 2.5) {
     float top = 0.45 + 0.55 * base;
     prof = smoothstep(0.0, 0.25, hf) * (1.0 - smoothstep(top * 0.55, top, hf));
   } else {
@@ -86,7 +108,8 @@ float density(vec3 p, float h, vec4 A, vec4 B, vec4 C, bool detail) {
     prof = smoothstep(lift, lift + 0.15, hf) * (1.0 - smoothstep(0.55 + 0.4 * base, 1.0, hf));
   }
   // Keep a gradient from edge to core so erosion carves billows, not just a fringe.
-  float d = sat(base * 1.6) * sqrt(prof);
+  // Altocumulus stays thin at the edges so cloudlets fade rather than end in a rim.
+  float d = (B.x < 2.5 ? sat(base * 1.2) : sat(base * 1.6)) * sqrt(prof);
   if (d <= 0.0 || !detail) return d;
   vec3 q = vec3(w.x, h * 1.3, w.y) / (B.y * 0.45) + vec3(C.z * 4.0, C.z * 6.0, 0.0);
   // Big billows shape the silhouette; small ones roughen it.
@@ -120,22 +143,28 @@ void main() {
     float lT = 1.0;
 
     if (A.y <= 0.0) {
-      // Thin sheet (cirrus): fibrous streaks along the wind.
+      // Thin sheet (cirrus): a soft envelope of patches and bands, with fine fibres
+      // inside it that curve as the cross-wind coordinate wanders.
       vec3 p = dir * t0;
       vec2 w = p.xz + C.xy;
       vec2 wd = vec2(cos(C.w), sin(C.w));
-      vec2 r = vec2(dot(w, wd), dot(w, vec2(-wd.y, wd.x))) / (B.y * 8.0);
-      float lod = clamp(log2(t0 / (B.y * 8.0) * 256.0 * 0.004), 0.0, 6.0);
-      r.y += (textureLod(uNoise2D, r * 0.5 + C.z, lod).b - 0.5) * 0.25;
-      float base = textureLod(uNoise2D, r * vec2(0.5, 0.9) + C.z * 0.5, lod).r;
-      float fib = textureLod(uNoise2D, vec2(r.x * 0.9, r.y * 7.0) + C.z, lod).a;
-      float fib2 = textureLod(uNoise2D, vec2(r.x * 1.7, r.y * 19.0) - C.z, lod + 1.0).a;
-      float n = base * 0.62 + fib * 0.3 + fib2 * 0.18 - 0.08;
-      float dens = smoothstep(1.0 - A.z, 1.0 - A.z + 0.32, n) * A.w;
-      float alpha = 1.0 - exp(-dens * 1.6);
+      float sc = B.y * 8.0;
+      vec2 r = vec2(dot(w, wd), dot(w, vec2(-wd.y, wd.x))) / sc;
+      // Texels per pixel at unit frequency; grazing rays stretch the footprint.
+      float fp = log2(max(t0 * uPixAng / max(dir.y, 0.03) / sc * 256.0, 1e-4));
+      #define CLOD(f) clamp(fp + log2(f), 0.0, 8.0)
+      r.y += (textureLod(uNoise2D, vec2(r.x * 0.35, r.y * 0.5) + C.z * 0.3, CLOD(0.5)).b - 0.5) * 0.45;
+      vec2 r2 = r + (textureLod(uNoise2D, r * 0.25 - C.z * 0.2, CLOD(0.25)).rb - 0.5) * 0.3;
+      float env = textureLod(uNoise2D, r2 * vec2(0.3, 1.1) + C.z * 0.5, CLOD(1.1)).r;
+      env = smoothstep(0.92 - A.z, 1.2 - A.z, env);
+      float f1 = textureLod(uNoise2D, vec2(r.x * 0.7, r.y * 6.0) + C.z, CLOD(6.0)).a;
+      float f2 = textureLod(uNoise2D, vec2(r.x * 1.3, r.y * 17.0) - C.z, CLOD(17.0)).a;
+      float fib = smoothstep(0.42, 0.62, f1 * 0.55 + f2 * 0.45);
+      float dens = env * mix(0.15, 1.0, fib) * A.w;
+      float alpha = 1.0 - exp(-dens * 1.3);
       float sunEl = sunEl0 + dot(p.xz, uSunAz) / RG;
       vec3 sunT = transLut(A.x, sunEl) * SUN_I;
-      vec3 S = sunT * phase * 2.2 + (uAmbTop * 0.6 + uAmbSide * 0.4) / PI * 0.7;
+      vec3 S = sunT * phase * 1.3 + (uAmbTop * 0.6 + uAmbSide * 0.4) / PI * 0.7;
       lcol = S * alpha;
       lT = 1.0 - alpha;
     } else {
@@ -210,6 +239,7 @@ export class CloudPass {
       uNoise2D: { value: tex2 },
       uNoise3D: { value: tex3 },
       uTanHalf: { value: new THREE.Vector2(1, 1) },
+      uPixAng: { value: 0.002 },
       uCamRot: { value: new THREE.Matrix3() },
       uCamAlt: { value: camAltKm },
       uSunAz: { value: sunAz },
@@ -258,6 +288,7 @@ export class CloudPass {
     const width = THREE.MathUtils.clamp(Math.round(quality * drawWidth * (tx / tanMainH)), 64, 2048);
     const height = THREE.MathUtils.clamp(Math.round((width * ty) / tx), 64, 2048);
     this.target.setSize(width, height);
+    this.uniforms.uPixAng.value = (2 * ty) / height;
   }
 
   /** cloudTime: seconds of (accelerated) cloud time. */
