@@ -50,6 +50,8 @@ function start() {
 
   const params = new URLSearchParams(location.search);
   const fixedT = params.has('t') ? Number(params.get('t')) : null;
+  // With ?t=, &ts= also pins the animation clock (seconds) so frames are repeatable.
+  const fixedTime = fixedT !== null && params.has('ts') ? Number(params.get('ts')) : null;
   let settings = settingsFromQuery(location.search, { ...DEFAULT_SETTINGS, seed: randomSeed() });
 
   let world = new SunsetScene(settings);
@@ -154,7 +156,7 @@ function start() {
   const frame = (now: number) => {
     const dt = Math.min(0.1, (now - last) / 1000);
     last = now;
-    time += dt;
+    time = fixedTime ?? time + dt;
     if (mode === 'play' && !paused) {
       progress = Math.min(progress + dt / PACE_SECONDS[settings.pace], 1.3);
     }

@@ -7,7 +7,7 @@
 // integral of the local onshore wavenumber, precomputed per component into a table.
 import * as THREE from 'three';
 import { cloudNoise } from './noise';
-import { type Rng, range } from './rng';
+import { type Rng, makeRng, range } from './rng';
 import { COMMON_GLSL, NOISE_GLSL, shared } from './shared';
 import { SHORE_GLSL, type Shore, seabedDepth, shoreUniforms } from './terrain';
 
@@ -63,6 +63,7 @@ export function maxRunup(sea: SeaState): number {
 export class Ocean {
   readonly mesh: THREE.Mesh;
   private table: THREE.DataTexture;
+  private spray: THREE.Points | null;
 
   constructor(rng: Rng, shore: Shore, sea: SeaState) {
     const swellDir = range(rng, -0.3, 0.3);
@@ -112,6 +113,8 @@ export class Ocean {
     // and how it lingers shoreward.
     const summary = N_SWELL * NU * 4;
     let foam = 0;
+    let breakLo = Infinity;
+    let breakHi = -Infinity;
     for (let j = NU - 1; j >= 0; j--) {
       const h = Math.max(seabedDepth(shore, uAt(j)), 0.02);
       const ratio = hsUnc[j] / (GAMMA * h);
@@ -122,6 +125,10 @@ export class Ocean {
       if (j < NU - 1) foam *= Math.exp(-(uAt(j + 1) - uAt(j)) / FOAM_DECAY);
       foam = Math.max(foam, breaking);
       const approach = Math.min(1, Math.max(0, (ratio - 0.55) / 0.45));
+      if (breaking > 0.005) {
+        breakLo = Math.min(breakLo, uAt(j));
+        breakHi = Math.max(breakHi, uAt(j));
+      }
       const o = summary + j * 4;
       data[o] = breaking;
       data[o + 1] = foam;
@@ -278,6 +285,12 @@ export class Ocean {
           float foam = max(solid, web * smoothstep(0.12, 0.35, foamAmt));
           // Far away the pattern is finer than a pixel: show its average instead.
           foam = mix(foam, foamAmt * 0.55, smoothstep(40.0, 160.0, dist));
+          // Where a crest is breaking right now the whitewater is a thick tumbling mass,
+          // pouring over the lip and down the front face, not lace. It's big enough to
+          // keep its shape at any distance the surf is seen from.
+          float onFace = smoothstep(0.55, 0.9, o.crest) + smoothstep(0.7, 0.95, o.since) * smoothstep(0.2, 0.6, o.crest);
+          float fresh = smoothstep(0.12, 0.7, o.breaking) * clamp(onFace, 0.0, 1.0);
+          foam = max(foam, fresh * smoothstep(0.25, 0.6, lace * 0.6 + patches * 0.5));
           foam *= 1.0 - smoothstep(500.0, 2500.0, dist) * 0.7;
           float ndl = max(dot(N, uSunDir), 0.0);
           vec3 foamCol = vec3(0.85) * (uSunColor * uSunVis * (ndl * 0.6 + 0.2) + amb);
@@ -321,6 +334,9 @@ export class Ocean {
     this.mesh = new THREE.Mesh(geo, material);
     this.mesh.frustumCulled = false;
     this.mesh.renderOrder = 1;
+
+    this.spray = makeSpray(uniforms, breakLo, breakHi);
+    if (this.spray) this.mesh.add(this.spray);
   }
 
   setSunVisibility(v: number) {
@@ -330,6 +346,10 @@ export class Ocean {
   dispose() {
     this.mesh.geometry.dispose();
     (this.mesh.material as THREE.Material).dispose();
+    if (this.spray) {
+      this.spray.geometry.dispose();
+      (this.spray.material as THREE.Material).dispose();
+    }
     this.table.dispose();
   }
 }
@@ -349,6 +369,9 @@ struct OceanSample {
   float foam;     // whitewater amount 0..1
   float slopeVar; // slope variance of waves too small to resolve
   float cover;    // 0 where the swash film hasn't reached (soft edge, per pixel)
+  float breaking; // how hard the wave here is breaking right now (full only)
+  float since;    // fraction of a wave period since the main crest passed (full only)
+  float height;   // local swell height (m)
 };
 
 vec4 tableAt(int row, float u) {
@@ -363,9 +386,20 @@ OceanSample oceanAt(vec2 xz, float footprint, bool full) {
   OceanSample o;
   float u = offshore(xz);
   float uc = clamp(u, 0.0, ${UMAX.toFixed(1)});
-  vec4 summ = tableAt(${N_SWELL}, uc);
+  // Peeling: the line where waves break wanders along the beach and differs from wave
+  // to wave, so each wave breaks first at a peak and the break runs along the crest.
+  // It moves the breaking and the height cap (not the phase), and is a smooth field
+  // in both position and wave count so the surface never tears.
+  float th2 = uSwell[2].y * xz.x - tableAt(2, uc).x - uSwell[2].x * uTime + uSwell[2].z;
+  float waveC = (1.5708 - th2) / 6.2832;
+  float pn = textureLod(uFoamTex, vec2(xz.x / 230.0 + 0.31, waveC * 0.37 + 0.13), 0.0).r * 0.7
+    + textureLod(uFoamTex, vec2(xz.x / 67.0 - waveC * 0.23, 0.71 - waveC * 0.31), 0.0).b * 0.3;
+  float L0 = 61.64 / (uSwell[2].x * uSwell[2].x);
+  float peel = clamp((pn - 0.5) * 4.0, -1.0, 1.0) * clamp(0.11 * L0, 3.0, 32.0);
+  float ub = clamp(u + peel, 0.0, ${UMAX.toFixed(1)});
+  vec4 summ = tableAt(${N_SWELL}, ub);
   float approach = summ.z;
-  float depth = summ.w;
+  float depth = tableAt(${N_SWELL}, uc).w;
   vec3 disp = vec3(0.0);
   vec3 dx = vec3(1.0, 0.0, 0.0);
   vec3 dz = vec3(0.0, 0.0, 1.0);
@@ -382,7 +416,7 @@ OceanSample oceanAt(vec2 xz, float footprint, bool full) {
     vec4 s = uSwell[i];
     vec4 t = tableAt(i, uc);
     float phi = t.x + (u > ${UMAX.toFixed(1)} ? s.w * (u - ${UMAX.toFixed(1)}) : 0.0) + (u < 0.0 ? t.z * u : 0.0);
-    float A = u < 0.0 ? 0.0 : t.y;
+    float A = u < 0.0 ? 0.0 : tableAt(i, ub).y;
     float k = t.w;
     float kx = s.y;
     float kz = t.z;
@@ -413,6 +447,13 @@ OceanSample oceanAt(vec2 xz, float footprint, bool full) {
   disp.z += lean * swellY;
   dx.z += lean * dSwellY.x;
   dz.z += lean * dSwellY.y;
+
+  // Broken waves carry a tumbling, lumpy bore of whitewater just behind the crest.
+  float sinceMain = fract((1.5708 - mainPhase) / 6.2832);
+  float lumps = textureLod(uFoamTex, vec2(xz.x / 11.0 + waveC * 0.41, waveC * 0.29 + sinceMain * 0.6), 0.0).g;
+  float bore = summ.y * smoothstep(0.0, 0.04, sinceMain) * exp(-sinceMain * 5.0)
+    * localH * 0.22 * (0.4 + 1.2 * lumps) * step(0.0, u);
+  disp.y += bore;
 
   float shallow = smoothstep(0.3, 3.0, depth) * (1.0 - 0.7 * summ.y);
   for (int i = 0; i < ${N_WIND}; i++) {
@@ -474,6 +515,9 @@ OceanSample oceanAt(vec2 xz, float footprint, bool full) {
   o.slopeVar = var;
   o.cover = cover;
   o.foam = 0.0;
+  o.breaking = 0.0;
+  o.since = 0.0;
+  o.height = localH;
   if (full) {
     // Whitewater: on breaking crests, trailing behind them through the surf zone,
     // and whitecaps on wind waves offshore.
@@ -491,7 +535,124 @@ OceanSample oceanAt(vec2 xz, float footprint, bool full) {
     float trail = summ.y * (exp(-sinceCrest * 2.2) * sect * sections + 0.16);
     float caps = uSea.z * smoothstep(0.75, 1.0, disp.y / max(uSea.y, 0.05)) * smoothstep(5.0, 20.0, depth);
     o.foam = max(clamp(max(max(crestFoam, trail), caps), 0.0, 1.0) * step(0.0, u + 1.0), swashFoam);
+    o.breaking = summ.x * sect * sections * step(0.0, u);
+    o.since = sinceCrest;
   }
   return o;
 }
 `;
+
+/** Alongshore half-width (m) and spacing of the spray anchors. */
+const SPRAY_HALF = 150;
+const SPRAY_DX = 0.35;
+const SPRAY_MAX_ROWS = 120;
+/** Furthest the peel moves the break line (matches the clamp in oceanAt). */
+const PEEL_MAX = 32;
+
+/**
+ * Spray thrown off breaking lips: points anchored on a grid over the surf zone. Each
+ * one launches shoreward and up as a breaking crest passes over it, arcs under
+ * gravity and fades, so together they form a curtain that runs along with the peel.
+ */
+function makeSpray(uniforms: Record<string, THREE.IUniform>, lo: number, hi: number): THREE.Points | null {
+  if (!(hi > lo)) return null;
+  lo = Math.max(0, lo - PEEL_MAX);
+  hi = hi + PEEL_MAX;
+  const rows = Math.min(SPRAY_MAX_ROWS, Math.ceil((hi - lo) / 0.5));
+  const du = (hi - lo) / rows;
+  const cols = Math.round((2 * SPRAY_HALF) / SPRAY_DX);
+  const seed = new Float32Array(rows * cols * 4);
+  const rand = makeRng(9173);
+  let k = 0;
+  for (let j = 0; j < rows; j++) {
+    for (let i = 0; i < cols; i++) {
+      seed[k++] = -SPRAY_HALF + (i + 0.5) * SPRAY_DX;
+      seed[k++] = lo + (j + 0.5) * du;
+      seed[k++] = rand();
+      seed[k++] = rand();
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  // Positions are computed in the shader; three.js still wants a position attribute.
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(rows * cols * 3), 3));
+  geo.setAttribute('aSeed', new THREE.BufferAttribute(seed, 4));
+  const pointScale = { value: 500 };
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { ...uniforms, uPointScale: pointScale, uCell: { value: new THREE.Vector2(SPRAY_DX, du) } },
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.CustomBlending,
+    blendSrc: THREE.OneFactor,
+    blendDst: THREE.OneMinusSrcAlphaFactor,
+    vertexShader: /* glsl */ `
+      ${COMMON_GLSL}
+      ${SHORE_GLSL}
+      ${OCEAN_GLSL}
+      attribute vec4 aSeed; // x along the beach, offshore u, two randoms
+      uniform float uPointScale;
+      uniform float uSunVis;
+      uniform vec2 uCell;
+      varying float vAlpha;
+      varying vec3 vCol;
+      varying vec3 vWorld;
+      void main() {
+        gl_PointSize = 0.0;
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        vAlpha = 0.0;
+        float r1 = aSeed.z, r2 = aSeed.w;
+        // Only some anchors throw spray, which keeps it from looking like a sheet.
+        if (r1 > 0.8) return;
+        float x = aSeed.x + (fract(r2 * 17.3) - 0.5) * uCell.x;
+        float u0 = aSeed.y + (fract(r1 * 23.9) - 0.5) * uCell.y;
+        vec2 xz = vec2(x, -(u0 + shoreDist(x)));
+        OceanSample o = oceanAt(xz, 0.5, true);
+        // Spray comes off the crest of breaking sections, so it rides the lip you see.
+        float atCrest = smoothstep(0.7, 1.05, o.crest);
+        // Small waves spill quietly; bigger ones throw more.
+        float strength = smoothstep(0.03, 0.6, o.breaking) * atCrest * smoothstep(0.4, 1.6, o.height);
+        if (strength < 0.03) return;
+        // Each droplet loops through short arcs: up off the lip, forward and down.
+        float life = mix(0.5, 1.2, r2);
+        float t = fract(uTime / life + fract(r1 * 31.7)) * life;
+        float H = max(o.height, 0.15);
+        float c = sqrt(9.81 * 2.0 * H);
+        vec2 shore = normalize(vec2(shoreDist(x + 0.5) - shoreDist(x - 0.5), 1.0));
+        float vh = c * mix(0.15, 0.6, fract(r1 * 7.7));
+        float vu = mix(0.6, 2.4, fract(r2 * 5.3)) * sqrt(H);
+        vec3 p = vec3(xz.x, 0.0, xz.y) + o.disp
+          + vec3(shore.x, 0.0, shore.y) * vh * t + vec3(0.0, vu * t - 4.9 * t * t, 0.0);
+        if (p.y < o.disp.y - H * 0.6) return;
+        vWorld = p;
+        vAlpha = strength * smoothstep(0.0, 0.08, t) * (1.0 - smoothstep(life * 0.3, life, t)) * 0.16;
+        // Backlit droplets glow; front-lit spray is plain white.
+        vec3 v = normalize(p - cameraPosition);
+        float g = 0.6, cosT = dot(v, uSunDir);
+        float hg = (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * cosT, 1.5) / (4.0 * PI);
+        vCol = 0.9 * (uSunColor * uSunVis * (0.2 + hg * 1.5) + ambientLight(vec3(0.0, 1.0, 0.0)));
+        vec4 mv = viewMatrix * vec4(p, 1.0);
+        gl_Position = projectionMatrix * mv;
+        float size = mix(0.35, 0.9, fract(r1 * 3.1)) * sqrt(H) * (1.0 + 2.0 * t);
+        gl_PointSize = min(size * uPointScale / max(-mv.z, 0.1), 64.0);
+      }`,
+    fragmentShader: /* glsl */ `
+      ${COMMON_GLSL}
+      varying float vAlpha;
+      varying vec3 vCol;
+      varying vec3 vWorld;
+      void main() {
+        float d = length(gl_PointCoord - 0.5) * 2.0;
+        float a = vAlpha * exp(-d * d * 3.0) * (1.0 - smoothstep(0.7, 1.0, d));
+        if (a < 0.003) discard;
+        gl_FragColor = vec4(applyAtmosphere(vCol, vWorld) * uExposure * a, a);
+      }`,
+  });
+  const points = new THREE.Points(geo, mat);
+  points.frustumCulled = false;
+  points.renderOrder = 2;
+  const size = new THREE.Vector2();
+  points.onBeforeRender = (renderer, _scene, camera) => {
+    renderer.getDrawingBufferSize(size);
+    pointScale.value = size.y * 0.5 * (camera as THREE.PerspectiveCamera).projectionMatrix.elements[5];
+  };
+  return points;
+}
