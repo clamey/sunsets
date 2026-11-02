@@ -416,6 +416,8 @@ function terrainMaterial(shore: Shore, maxRunup: number): THREE.ShaderMaterial {
           // Shallow hollows hold a skin of water for a while after the swash leaves.
           const mat2 RH = mat2(0.8, 0.6, -0.6, 0.8);
           float hollow = smoothstep(0.58, 0.68, textureLod(uFoamTex, RH * vWorld.xz / 7.0 + 0.27, 0.0).g) * 0.8;
+          // Patches that hold their water a little longer or shorter than their neighbours.
+          float patchy = clamp(textureLod(uFoamTex, RH * vWorld.xz / 1.7 + 0.41, 0.0).r * 0.7 + rill * 0.3, 0.0, 1.0);
           for (int k = 0; k < 4; k++) {
             float R = swashReach(vWorld.x, sw - float(k));
             float tk = psi + float(k); // swashes since swash sw-k began
@@ -429,8 +431,13 @@ function terrainMaterial(shore: Shore, maxRunup: number): THREE.ShaderMaterial {
               float a = tk >= psiDown ? (tk - psiDown) * T : (tk >= psiUp ? 0.0 : 1e4);
               // The last few tens of centimetres of a swash only dampen the sand.
               float edge = 1.0 - smoothstep(R - 0.6, R, upB);
-              wet = max(wet, mix(0.5, 1.0, edge) * exp(-a / 15.0) * keep);
-              float film = max(edge * exp(-a / 6.0) * smoothstep(0.0, 0.3, rill + 0.5 - a / 10.0), hollow * exp(-a / 25.0));
+              // Soaking in: the glassy skin goes first where the sheet was thinnest, near
+              // the top of the run-up, winking out patch by patch down the slope; the
+              // darkness follows more slowly, drying from the top down too.
+              float shineFor = mix(5.0, 1.2, f) * (0.4 + 1.2 * patchy);
+              float dryFor = mix(30.0, 9.0, f) * (0.7 + 0.6 * patchy);
+              wet = max(wet, mix(0.5, 1.0, edge) * (1.0 - smoothstep(0.15 * dryFor, dryFor, a)) * keep);
+              float film = max(edge * (1.0 - smoothstep(0.55 * shineFor, shineFor, a)), hollow * exp(-a / 25.0));
               sheen = max(sheen, film * keep);
             }
             // Foam left along the top of the run-up as the water turned back.
