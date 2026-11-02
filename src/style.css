@@ -192,16 +192,120 @@ body.idle * {
 
 .btn.go {
   flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
   border: none;
   color: #2a1622;
-  font-weight: 600;
+  font: 600 20px/1 var(--serif);
+  letter-spacing: 0.01em;
   background: linear-gradient(120deg, var(--warm-1), var(--warm-2) 55%, var(--warm-3));
   box-shadow: 0 8px 26px rgba(240, 138, 93, 0.35);
+  animation: breathe 3.2s ease-in-out infinite;
 }
 
 .btn.go:hover {
-  box-shadow: 0 10px 32px rgba(240, 138, 93, 0.5);
   background: linear-gradient(120deg, #ffd99e, #f59a6e 55%, #c66688);
+  animation-play-state: paused;
+  box-shadow: 0 10px 36px rgba(240, 138, 93, 0.6);
+}
+
+.btn.go svg {
+  width: 20px;
+  height: 20px;
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    box-shadow: 0 8px 26px rgba(240, 138, 93, 0.35), 0 0 0 0 rgba(255, 207, 138, 0);
+  }
+  50% {
+    box-shadow: 0 10px 34px rgba(240, 138, 93, 0.55), 0 0 0 6px rgba(255, 207, 138, 0.16);
+  }
+}
+
+/* ---------- play button over the scene ---------- */
+
+.cta {
+  position: fixed;
+  /* Centred in the open view beside the panel. */
+  left: calc(420px + (100vw - 420px) / 2);
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 12px;
+  color: var(--ink);
+  cursor: pointer;
+  transition: opacity 0.9s ease, transform 0.9s ease;
+  z-index: 2;
+}
+
+.cta.hidden {
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.94);
+  pointer-events: none;
+}
+
+.cta .ring {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #2a1622;
+  background: linear-gradient(135deg, var(--warm-1), var(--warm-2) 60%, var(--warm-3));
+  box-shadow: 0 12px 40px rgba(240, 138, 93, 0.45);
+  transition: transform 0.25s ease, box-shadow 0.25s ease;
+  animation: pulse 2.8s ease-out infinite;
+}
+
+.cta .ring svg {
+  width: 38px;
+  height: 38px;
+  margin-left: 5px;
+}
+
+.cta .label {
+  font-family: var(--serif);
+  font-size: 26px;
+  font-weight: 500;
+  text-shadow: 0 2px 18px rgba(0, 0, 0, 0.45);
+}
+
+.cta:hover .ring {
+  transform: scale(1.06);
+  box-shadow: 0 14px 48px rgba(240, 138, 93, 0.65);
+}
+
+.cta:active .ring {
+  transform: scale(0.97);
+}
+
+.cta:focus-visible {
+  outline: none;
+}
+
+.cta:focus-visible .ring {
+  outline: 2px solid var(--warm-1);
+  outline-offset: 4px;
+}
+
+@keyframes pulse {
+  0% {
+    box-shadow: 0 12px 40px rgba(240, 138, 93, 0.45), 0 0 0 0 rgba(255, 207, 138, 0.45);
+  }
+  70%,
+  100% {
+    box-shadow: 0 12px 40px rgba(240, 138, 93, 0.45), 0 0 0 26px rgba(255, 207, 138, 0);
+  }
 }
 
 .btn.icon {
@@ -412,6 +516,23 @@ body.idle * {
   .panel.hidden {
     transform: translateY(24px);
   }
+  /* Centred in the sky above the panel. */
+  .cta {
+    left: 50%;
+    top: calc((100vh - 58vh - 12px) / 2);
+    gap: 10px;
+  }
+  .cta .ring {
+    width: 76px;
+    height: 76px;
+  }
+  .cta .ring svg {
+    width: 30px;
+    height: 30px;
+  }
+  .cta .label {
+    font-size: 22px;
+  }
   .hud {
     bottom: 12px;
   }
@@ -421,7 +542,12 @@ body.idle * {
   .panel,
   .hud,
   .caption,
-  .veil {
+  .veil,
+  .cta {
     transition-duration: 0.01s;
+  }
+  .btn.go,
+  .cta .ring {
+    animation: none;
   }
 }

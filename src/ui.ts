@@ -38,6 +38,7 @@ export class UI {
   private phaseLabel: HTMLElement;
   private timeLabel: HTMLElement;
   private pauseBtn: HTMLButtonElement;
+  private cta: HTMLButtonElement;
   private groups = new Map<Key, HTMLElement>();
   private idleTimer = 0;
   private captionTimer = 0;
@@ -51,13 +52,13 @@ export class UI {
     this.panel.innerHTML = `
       <header>
         <h1>Sunsets</h1>
-        <p class="tagline">Choose the sea and sky, then watch the light go.</p>
+        <p class="tagline">The scene is set: press play, or change it first.</p>
       </header>
       <div class="options"></div>
       <footer>
         <button class="btn icon" data-act="reroll" title="New variation of this scene" aria-label="New variation">${ICONS.dice}</button>
         <button class="btn icon" data-act="surprise" title="Surprise me" aria-label="Surprise me">${ICONS.sparkle}</button>
-        <button class="btn go" data-act="go">Watch the sunset</button>
+        <button class="btn go" data-act="go">${ICONS.play}<span>Watch the sunset</span></button>
       </footer>`;
     const opts = this.panel.querySelector('.options') as HTMLElement;
     this.addGroup(opts, 'Waves', 'waves', WAVES, true);
@@ -71,6 +72,12 @@ export class UI {
     this.panel.querySelector('[data-act=reroll]')!.addEventListener('click', () => h.onReroll());
     this.panel.querySelector('[data-act=surprise]')!.addEventListener('click', () => h.onSurprise());
     this.panel.querySelector('[data-act=go]')!.addEventListener('click', () => h.onGo());
+
+    // A big play button over the scene itself, so it's obvious the settings are optional.
+    this.cta = document.createElement('button');
+    this.cta.className = 'cta';
+    this.cta.innerHTML = `<span class="ring">${ICONS.play}</span><span class="label">Watch the sunset</span>`;
+    this.cta.addEventListener('click', () => h.onGo());
 
     this.hud = el('div', 'hud hidden');
     this.hud.innerHTML = `
@@ -97,13 +104,17 @@ export class UI {
     this.caption = el('div', 'caption');
     this.toastEl = el('div', 'toast');
     this.toastEl.setAttribute('role', 'status');
-    root.append(this.veil, this.caption, this.panel, this.hud, this.toastEl);
+    root.append(this.veil, this.caption, this.cta, this.panel, this.hud, this.toastEl);
 
     const wake = () => this.wake();
     window.addEventListener('pointermove', wake);
     window.addEventListener('pointerdown', wake);
     window.addEventListener('keydown', (e) => {
-      if (!this.playing) return;
+      if (!this.playing) {
+        // Enter starts the sunset from the setup screen (unless it's activating a button).
+        if (e.key === 'Enter' && !(e.target instanceof HTMLButtonElement) && !this.panel.inert) h.onGo();
+        return;
+      }
       if (e.code === 'Space' && !(e.target instanceof HTMLButtonElement)) {
         e.preventDefault();
         h.onTogglePause();
@@ -151,6 +162,7 @@ export class UI {
     this.playing = false;
     this.panel.classList.remove('hidden');
     this.panel.inert = false;
+    this.cta.classList.remove('hidden');
     this.hud.classList.add('hidden');
     document.body.classList.remove('idle');
     window.clearTimeout(this.idleTimer);
@@ -160,12 +172,14 @@ export class UI {
     this.playing = true;
     this.panel.classList.add('hidden');
     this.panel.inert = true;
+    this.cta.classList.add('hidden');
     this.wake();
   }
 
   hideAll() {
     this.panel.classList.add('hidden');
     this.panel.inert = true;
+    this.cta.classList.add('hidden');
     this.hud.classList.add('hidden');
   }
 
