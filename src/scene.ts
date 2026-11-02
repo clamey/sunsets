@@ -73,6 +73,7 @@ export class SunsetScene {
 
     this.ocean = new Ocean(sub(6), this.terrain.shore, sea);
     this.scene.add(this.ocean.mesh);
+    this.terrain.setSwash(this.ocean.swash);
 
     this.birds = new BirdSystem(sub(5), settings.birds);
     this.scene.add(this.birds.mesh);

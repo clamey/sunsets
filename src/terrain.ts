@@ -3,6 +3,7 @@
 // The shoreline and seabed are analytic so the ocean shader can use the same shape.
 import * as THREE from 'three';
 import { Noise2D, type Rng, clamp, lerp, range, smoothstep } from './rng';
+import { cloudNoise } from './noise';
 import { COMMON_GLSL, NOISE_GLSL, shared } from './shared';
 
 type RGB = [number, number, number];
@@ -90,6 +91,37 @@ float seabedDepth(float u) {
 }
 // Sand height near the waterline (no dunes or headland).
 float sandHeight(float u) { return u > 0.0 ? -seabedDepth(u) : -u * uShoreB.w; }
+
+// Swash: after each wave reaches the beach, a thin sheet runs up the sand and back.
+// The ocean draws the sheet and the sand shades where it has been, so both use these.
+uniform vec4 uSwashA;       // main swell: omega, alongshore k, phase, unused
+uniform vec4 uSwashB;       // group swell: omega, alongshore k, unused, unused
+uniform sampler2D uFoamTex; // tiling noise
+// Continuous count of swashes at x: the integer part numbers each swash, the fraction is
+// its phase. Different stretches of beach are reached at slightly different moments.
+float swashOffset(float x) { return (textureLod(uFoamTex, vec2(x / 170.0 + 0.11, 0.37), 0.0).r - 0.5) * 0.12; }
+float swashCount(float x, float t) {
+  float th = uSwashA.y * x - uSwashA.x * t + uSwashA.z;
+  return (1.5708 - th) / 6.2832 + swashOffset(x);
+}
+// Fraction of its full reach a swash covers at phase psi: up to 0.3, back by 0.92.
+float swashRise(float psi) {
+  return psi < 0.3 ? sin(psi / 0.3 * 1.5708) : (psi < 0.92 ? pow(1.0 - (psi - 0.3) / 0.62, 1.6) : 0.0);
+}
+// How far up the beach (m) swash n runs at x. Each swash keeps its shape while it runs:
+// broad lobes, narrower tongues, small fingers, and the scalloped rhythm of beach cusps.
+// Bigger wave groups run further.
+float swashReach(float x, float n) {
+  float wPeak = 6.2832 * (n + 0.3 - swashOffset(x)) - 1.5708 + uSwashA.y * x + uSwashA.z;
+  float group = 0.65 + 0.35 * sin(uSwashB.y * x * 0.5 - (uSwashB.x / uSwashA.x - 1.0) * wPeak + 1.3);
+  vec4 nA = textureLod(uFoamTex, vec2(x / 45.0 + n * 0.618, n * 0.37), 0.0);
+  vec4 nB = textureLod(uFoamTex, vec2(x / 11.0 - n * 0.41, 0.53 + n * 0.29), 0.0);
+  float lobes = 0.4 + 0.9 * clamp((nA.g - 0.3) / 0.45, 0.0, 1.0);
+  float tongues = 0.75 + 0.5 * clamp((nB.g - 0.3) / 0.45, 0.0, 1.0);
+  float fingers = 1.0 + 0.8 * (textureLod(uFoamTex, vec2(x / 40.0 + n * 0.29, 0.21 + n * 0.53), 0.0).a - 0.5);
+  float cusps = 1.0 + 0.14 * sin(x * 6.2832 / 26.0 + 1.7 + 0.6 * sin(x / 61.0));
+  return uShoreC.z * group * lobes * tongues * fingers * cusps / uShoreB.w;
+}
 `;
 
 export function shoreUniforms(s: Shore, maxRunup: number) {
@@ -97,6 +129,9 @@ export function shoreUniforms(s: Shore, maxRunup: number) {
     uShoreA: { value: new THREE.Vector4(s.dist, s.a1, s.l1, s.p1) },
     uShoreB: { value: new THREE.Vector4(s.a2, s.l2, s.p2, s.foreshore) },
     uShoreC: { value: new THREE.Vector4(s.seabed, MAX_DEPTH, maxRunup, 0) },
+    uSwashA: { value: new THREE.Vector4() },
+    uSwashB: { value: new THREE.Vector4() },
+    uFoamTex: { value: cloudNoise().tex2 },
   };
 }
 
@@ -230,10 +265,34 @@ export class Terrain {
     const pos = new Float32Array(count * 3);
     const col = new Float32Array(count * 3);
     const hor = new Float32Array(count);
+    // The beach meets the seabed in a sharp corner at the waterline. A triangle spanning
+    // it would sag a few centimetres below the sand, enough for a grazing line of sight to
+    // slip under the beach and see the seabed through the thin water, so each column of
+    // the grid gets a vertex exactly on the waterline.
+    const ringR = (j: number) => R0 * Math.exp(k * j);
+    const snapJ = new Int32Array(NA).fill(-1);
+    const snapR = new Float32Array(NA);
+    for (let i = 0; i < NA; i++) {
+      const a = A0 + ((A1 - A0) * i) / (NA - 1);
+      const uAt = (r: number) => Math.cos(a) * r - shoreline(this.shore, Math.sin(a) * r);
+      for (let j = 1; j < NR; j++) {
+        let lo = ringR(j - 1);
+        let hi = ringR(j);
+        if (!(uAt(lo) < 0 && uAt(hi) >= 0)) continue;
+        snapJ[i] = -uAt(lo) < uAt(hi) ? j - 1 : j;
+        for (let it = 0; it < 30; it++) {
+          const mid = (lo + hi) / 2;
+          if (uAt(mid) < 0) lo = mid;
+          else hi = mid;
+        }
+        snapR[i] = (lo + hi) / 2;
+        break;
+      }
+    }
     for (let j = 0; j < NR; j++) {
-      const r = R0 * Math.exp(k * j);
       for (let i = 0; i < NA; i++) {
         const a = A0 + ((A1 - A0) * i) / (NA - 1);
+        const r = snapJ[i] === j ? snapR[i] : ringR(j);
         const x = Math.sin(a) * r;
         const z = -Math.cos(a) * r;
         const v = j * NA + i;
@@ -273,6 +332,13 @@ export class Terrain {
     const mesh = new THREE.Mesh(geo, terrainMaterial(this.shore, maxRunup));
     mesh.frustumCulled = false;
     return mesh;
+  }
+
+  /** Swell timing from the ocean, so the sand shades where the swash has been. */
+  setSwash(swash: { a: THREE.Vector4; b: THREE.Vector4 }) {
+    const u = (this.mesh.material as THREE.ShaderMaterial).uniforms;
+    u.uSwashA.value.copy(swash.a);
+    u.uSwashB.value.copy(swash.b);
   }
 
   dispose() {
@@ -318,27 +384,80 @@ function terrainMaterial(shore: Shore, maxRunup: number): THREE.ShaderMaterial {
         }
         vec3 albedo = vColor * detail;
 
-        // Sand the swash reaches is darker and glassy; underwater sand is darker still.
-        float wet = 1.0 - smoothstep(uShoreC.z, uShoreC.z + 0.3, vWorld.y);
-        wet *= 1.0 - smoothstep(-30.0, 0.0, -offshore(vWorld.xz) - 60.0);
+        // Underwater sand is dark; sand up to the highest run-up stays damp.
+        float u = offshore(vWorld.xz);
+        float upB = -u; // metres up the beach from still water
+        float reached = 1.0 - smoothstep(uShoreC.z, uShoreC.z + 0.3, vWorld.y);
+        reached *= 1.0 - smoothstep(-30.0, 0.0, upB - 60.0);
+        float wet = max(step(0.0, u), reached * mix(0.3, 0.8, smoothstep(250.0, 450.0, dist)));
+
+        // Where recent swashes have been. Sand a swash covered is saturated; once the
+        // water drains off, a glassy film lingers a few seconds and breaks into streaks
+        // running back down the slope, while the darkness fades slowly as the water soaks
+        // in. Foam is stranded along each swash's highest reach, and water lingers in hollows.
+        float sheen = 0.0;
+        float stranded = 0.0;
+        if (u < 0.5 && upB < uShoreC.z * 2.4 / uShoreB.w && dist < 450.0) {
+          float cnt = swashCount(vWorld.x, uTime);
+          float sw = floor(cnt);
+          float psi = cnt - sw;
+          float T = 6.2832 / uSwashA.x;
+          // Drainage rills: noise stretched down the slope, drying from the troughs out.
+          float rill = 0.5 + (textureLod(uFoamTex, vec2(vWorld.x / 3.0, upB / 30.0), 0.0).r - 0.5) * 1.4
+            + (textureLod(uFoamTex, vec2(vWorld.x / 1.1, upB / 9.0 + 0.4), 0.0).b - 0.5) * 0.9;
+          // Shallow hollows hold a skin of water for a while after the swash leaves.
+          const mat2 RH = mat2(0.8, 0.6, -0.6, 0.8);
+          float hollow = smoothstep(0.58, 0.68, textureLod(uFoamTex, RH * vWorld.xz / 7.0 + 0.27, 0.0).g) * 0.8;
+          for (int k = 0; k < 4; k++) {
+            float R = swashReach(vWorld.x, sw - float(k));
+            float tk = psi + float(k); // swashes since swash sw-k began
+            float f = max(upB, 0.0) / max(R, 0.01);
+            // The oldest swash fades out before it drops off the end of the history.
+            float keep = k == 3 ? 1.0 - psi : 1.0;
+            if (f < 1.0) {
+              // Inverse of swashRise: when the uprush arrived here, and when it left.
+              float psiUp = asin(f) / 1.5708 * 0.3;
+              float psiDown = 0.3 + 0.62 * (1.0 - pow(f, 0.625));
+              float a = tk >= psiDown ? (tk - psiDown) * T : (tk >= psiUp ? 0.0 : 1e4);
+              // The last few tens of centimetres of a swash only dampen the sand.
+              float edge = 1.0 - smoothstep(R - 0.6, R, upB);
+              wet = max(wet, mix(0.5, 1.0, edge) * exp(-a / 15.0) * keep);
+              float film = max(edge * exp(-a / 6.0) * smoothstep(0.0, 0.3, rill + 0.5 - a / 10.0), hollow * exp(-a / 25.0));
+              sheen = max(sheen, film * keep);
+            }
+            // Foam left along the top of the run-up as the water turned back.
+            if (tk > 0.3) {
+              float line = smoothstep(R - 0.9, R - 0.15, upB) * (1.0 - smoothstep(R - 0.15, R + 0.05, upB));
+              stranded = max(stranded, line * smoothstep(0.3, 0.45, tk) * exp(-(tk - 0.3) * T / 7.0) * keep);
+            }
+          }
+          float speck = textureLod(uFoamTex, RH * vWorld.xz / 1.9 + 0.61, 0.0).g;
+          stranded *= smoothstep(0.35, 0.6, speck * 0.7 + stranded * 0.4);
+        }
+        // Sand right at the waterline is always streaming wet.
+        sheen = max(sheen, smoothstep(-0.5, 0.0, u) * (1.0 - smoothstep(0.5, 1.0, u)));
         albedo *= mix(1.0, 0.55, wet);
+        albedo = mix(albedo, vec3(0.88, 0.87, 0.85), stranded * 0.85);
 
         float sunEl = asin(clamp(uSunDir.y, -1.0, 1.0));
         float vis = smoothstep(vHorizon - 0.004, vHorizon + 0.006, sunEl);
         float ndl = max(dot(n, uSunDir), 0.0);
         vec3 col = albedo * (uSunColor * ndl * vis + ambientLight(n));
 
-        // Only the strip the last swash just left is glassy; higher up it is merely damp.
-        float glassy = wet * (1.0 - smoothstep(uShoreC.z * 0.15, uShoreC.z * 0.5, vWorld.y)) * 0.6;
-        if (glassy > 0.01 && vWorld.y > -0.3) {
-          vec3 wn = normalize(vec3(snoise(vWorld.xz * 0.8) * 0.012, 1.0, snoise(vWorld.xz * 0.8 + 7.0) * 0.012));
+        // Wet sand reflects a little sky at grazing angles; the draining film is a mirror
+        // for the sky and sun, roughening as it thins.
+        float shine = max(sheen, wet * 0.25);
+        if (shine > 0.01 && vWorld.y > -0.3) {
+          float rough = mix(0.03, 0.003, sheen);
+          vec2 ws = (textureLod(uFoamTex, vWorld.xz / 5.0 + 0.33, 0.0).rb - 0.5) * 4.0;
+          vec3 wn = normalize(vec3(ws.x * rough, 1.0, ws.y * rough));
           vec3 R = reflect(-V, wn);
           float F = 0.02 + 0.98 * pow(1.0 - max(dot(wn, V), 0.0), 5.0);
-          float glint = exp(-(1.0 - max(dot(R, uSunDir), 0.0)) / 0.0015);
+          float glint = exp(-(1.0 - max(dot(R, uSunDir), 0.0)) / mix(0.004, 0.0008, sheen));
           vec3 g = uSunColor * vis * glint * 1.5;
           float gm = max(g.r, max(g.g, g.b)) * uExposure;
           g *= gm > 8.0 ? 8.0 / gm : 1.0;
-          col += glassy * F * (skyReflection(R) * 0.7 + g);
+          col = mix(col, skyReflection(R) * 0.8 + g, shine * F);
         }
         col = applyAtmosphere(col, vWorld);
         gl_FragColor = vec4(col * uExposure, 1.0);

@@ -62,6 +62,8 @@ export function maxRunup(sea: SeaState): number {
 
 export class Ocean {
   readonly mesh: THREE.Mesh;
+  /** Swell timing the swash follows, for the sand to know where it has been. */
+  readonly swash: { a: THREE.Vector4; b: THREE.Vector4 };
   private table: THREE.DataTexture;
   private spray: THREE.Points | null;
 
@@ -166,9 +168,12 @@ export class Ocean {
       uWindPhase: { value: windPhase },
       uSea: { value: new THREE.Vector4(sea.height, sea.windHeight, sea.whitecaps, sea.period) },
       uFoamTex: { value: tex2 },
+      uSwashA: { value: new THREE.Vector4(swellU[2].x, swellU[2].y, swellU[2].z, 0) },
+      uSwashB: { value: new THREE.Vector4(swellU[4].x, swellU[4].y, 0, 0) },
       uSunVis: { value: 1 },
     };
 
+    this.swash = { a: uniforms.uSwashA.value, b: uniforms.uSwashB.value };
     const material = new THREE.ShaderMaterial({
       uniforms,
       transparent: true,
@@ -214,6 +219,15 @@ export class Ocean {
           vec3 V = toCam / dist;
           // A pixel covers a long stretch of sea at grazing angles: filter by that length.
           OceanSample o = oceanAt(vRest, dist * 0.0012 / max(V.y, 0.04), true);
+          // Where the film is cut away the view carries on to the sand behind it, unless
+          // this point sits high enough over the sand that the line of sight would skim
+          // past the waterline and down on to the seabed. Keep the film there, or the
+          // seabed shows through as dark slivers along the water's edge.
+          float uW = offshore(vWorld.xz);
+          float above = vWorld.y - sandHeight(uW);
+          float descent = V.y / max(length(V.xz), 1e-3) - uShoreB.w;
+          float skims = uW >= 0.0 || descent <= 0.0 ? 1.0 : smoothstep(0.6, 1.0, above / (descent * -uW));
+          o.cover = max(o.cover, skims);
           if (o.cover < 0.01) discard;
           vec3 N = o.normal;
           float uF = offshore(vRest);
@@ -256,7 +270,13 @@ export class Ocean {
           // See the sand through thin water near the shore.
           float u = offshore(vRest);
           float thick = max(vWorld.y - sandHeight(u), 0.0);
-          float alpha = mix(1.0 - exp(-thick * 2.2 / max(V.y, 0.15)), 1.0, F);
+          // Light refracts steeply into the water, so its path through shallow water is
+          // short even when the surface is seen at a grazing angle.
+          float cosT = sqrt(1.0 - (1.0 - cosV * cosV) / 1.78);
+          float alpha = mix(1.0 - exp(-thick * 2.2 / cosT), 1.0, F);
+          // The surface reflection is there however thin the water is; only the light
+          // from inside it fades with depth. (Output is premultiplied by alpha below.)
+          col = (refl * F + glitter + (alpha - F) * (body + sss)) / max(alpha, 1e-3);
 
           // Whitewater: lacy foam advected with the surface.
           float foamAmt = o.foam;
@@ -360,7 +380,6 @@ uniform vec4 uSwell[${N_SWELL}]; // omega, alongshore k, phase, deep onshore k
 uniform vec4 uWind[${N_WIND}];   // dir x, dir z, k, amplitude
 uniform float uWindPhase[${N_WIND}];
 uniform vec4 uSea;              // swell Hs, wind Hs, whitecaps, period
-uniform sampler2D uFoamTex;     // tiling noise (also used for foam lace)
 
 struct OceanSample {
   vec3 disp;
@@ -472,42 +491,46 @@ OceanSample oceanAt(vec2 xz, float footprint, bool full) {
     dz += vec3(-QA * w.x * w.y * k * sn, A * w.y * k * c, -QA * w.y * w.y * k * sn);
   }
 
-  // Swash: after each wave reaches the beach, a thin sheet runs up the sand and back.
+  // Swash running up the beach and back (see SHORE_GLSL).
   float swashFoam = 0.0;
   float cover = 1.0;
   if (u < 8.0) {
-    float thS = uSwell[2].y * xz.x - uSwell[2].x * uTime + uSwell[2].z;
-    // Continuous count of waves arriving: noise sampled along it changes from one
-    // swash to the next, and along the beach, without popping.
-    float waveNo = (1.5708 - thS) / 6.2832;
-    vec4 nA = textureLod(uFoamTex, vec2(xz.x / 70.0 + waveNo * 0.618, waveNo * 0.37), 0.0);
-    vec4 nB = textureLod(uFoamTex, vec2(xz.x / 17.0 - waveNo * 0.41, 0.53 + waveNo * 0.29), 0.0);
-    // Different stretches of beach are reached at slightly different moments...
-    float psi = fract(waveNo + (nA.r - 0.5) * 0.12);
-    float group = 0.65 + 0.35 * sin(uSwell[4].y * xz.x * 0.5 - (uSwell[4].x - uSwell[2].x) * uTime + 1.3);
-    float rise = psi < 0.3 ? sin(psi / 0.3 * 1.5708) : (psi < 0.92 ? pow(1.0 - (psi - 0.3) / 0.62, 1.6) : 0.0);
-    // ...and run up different distances: broad lobes, narrower tongues, and the
-    // scalloped rhythm of beach cusps.
-    float lobes = 0.45 + 0.85 * clamp((nA.g - 0.3) / 0.45, 0.0, 1.0);
-    float tongues = 0.8 + 0.4 * clamp((nB.g - 0.3) / 0.45, 0.0, 1.0);
-    float cusps = 1.0 + 0.14 * sin(xz.x * 6.2832 / 26.0 + 1.7 + 0.6 * sin(xz.x / 61.0));
-    // A thin film hugging the sloping sand, thinning to nothing at its leading edge.
-    float reach = uShoreC.z * group * rise * lobes * tongues * cusps / uShoreB.w;
+    float cnt = swashCount(xz.x, uTime);
+    float n = floor(cnt);
+    float psi = cnt - n;
+    float rise = swashRise(psi);
+    float furthest = swashReach(xz.x, n);
+    float reach = furthest * rise;
     if (u < 0.0) {
       float frac = -u / max(reach, 0.01);
-      // The film always sits just above the sand; its edge is cut per pixel (cover)
-      // so the outline follows the lobes smoothly instead of the mesh rows.
+      // A thin film hugging the sloping sand, thinning to nothing at its leading edge.
+      // It always sits just above the sand; its edge is cut per pixel (cover) so the
+      // outline follows the lobes smoothly instead of the mesh rows.
       float film = 0.02 + (frac < 1.0 ? uShoreC.z * 0.12 * pow(1.0 - frac, 0.8) : 0.0);
       disp = vec3(0.0, sandHeight(u) + film, 0.0);
-      cover = 1.0 - smoothstep(0.96, 1.0, frac);
+      dx = vec3(1.0, 0.0, 0.0);
+      dz = vec3(0.0, 0.0, 1.0);
+      // Draining back, the thinnest parts of the sheet go first, so its edge breaks up
+      // into ragged tongues and stranded patches.
+      float drain = smoothstep(0.3, 0.6, psi);
+      float holes = textureLod(uFoamTex, vec2(xz.x / 6.0 + n * 0.37, xz.y / 2.5 + n * 0.71), 0.0).g;
+      float edge = 1.0 - drain * 0.45 * smoothstep(0.25, 0.75, holes);
+      cover = 1.0 - smoothstep(0.92 * edge, edge, frac);
       if (u < -60.0) disp.y = -3.0;
-      // Bubbly foam front on the way up; a ragged, thinner fringe as it drains back.
-      bool up = psi < 0.3;
-      swashFoam = frac < 1.0 ? (up ? smoothstep(0.55, 0.97, frac) : smoothstep(0.75, 1.0, frac) * 0.55 * nB.b) : 0.0;
+      // Bubbly foam front on the way up; a ragged, thinner fringe as it drains back,
+      // popping away as the sheet thins out.
+      float ragged = textureLod(uFoamTex, vec2(xz.x / 17.0 - n * 0.41, 0.53 + n * 0.29), 0.0).b;
+      float front = smoothstep(0.55, 0.97, frac) * smoothstep(0.0, 0.3, rise);
+      float fringe = smoothstep(0.75, 1.0, frac) * 0.55 * ragged * smoothstep(0.0, 0.35, rise);
+      swashFoam = frac < 1.0 ? mix(front, fringe, smoothstep(0.24, 0.42, psi)) : 0.0;
     } else {
-      disp.y = max(disp.y, uShoreC.z * 0.12 * group * rise * (1.0 - smoothstep(0.0, 8.0, u)));
+      float size = clamp(furthest * uShoreB.w / uShoreC.z, 0.0, 1.3);
+      disp.y = max(disp.y, uShoreC.z * 0.12 * size * rise * (1.0 - smoothstep(0.0, 8.0, u)));
     }
   }
+
+  // A trough can't drain below the seabed: the water thins to a film over it instead.
+  if (u >= 0.0 && u < 40.0) disp.y = max(disp.y, sandHeight(offshore(xz + disp.xz)) + 0.03);
 
   o.disp = disp;
   o.normal = normalize(cross(dz, dx));
