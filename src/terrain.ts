@@ -122,6 +122,14 @@ float swashReach(float x, float n) {
   float cusps = 1.0 + 0.14 * sin(x * 6.2832 / 26.0 + 1.7 + 0.6 * sin(x / 61.0));
   return uShoreC.z * group * lobes * tongues * fingers * cusps / uShoreB.w;
 }
+// How far up the beach (m) the water's edge sits between swashes: the backwash and the
+// next bore keep a shallow, ragged margin of water over the sand that wanders slowly,
+// so the sea never ends along the bare still-water line.
+float swashBase(float x, float t) {
+  float a = textureLod(uFoamTex, vec2(x / 23.0 + t * 0.006, 0.83 + t * 0.011), 0.0).g;
+  float b = textureLod(uFoamTex, vec2(x / 5.0 - t * 0.017, 0.17 + t * 0.023), 0.0).b;
+  return uShoreC.z / uShoreB.w * (0.04 + 0.22 * clamp(a * 1.6 - 0.4, 0.0, 1.0) + 0.06 * b);
+}
 `;
 
 export function shoreUniforms(s: Shore, maxRunup: number) {
@@ -389,7 +397,7 @@ function terrainMaterial(shore: Shore, maxRunup: number): THREE.ShaderMaterial {
         float upB = -u; // metres up the beach from still water
         float reached = 1.0 - smoothstep(uShoreC.z, uShoreC.z + 0.3, vWorld.y);
         reached *= 1.0 - smoothstep(-30.0, 0.0, upB - 60.0);
-        float wet = max(step(0.0, u), reached * mix(0.3, 0.8, smoothstep(250.0, 450.0, dist)));
+        float wet = max(step(0.0, u + swashBase(vWorld.x, uTime)), reached * mix(0.3, 0.8, smoothstep(250.0, 450.0, dist)));
 
         // Where recent swashes have been. Sand a swash covered is saturated; once the
         // water drains off, a glassy film lingers a few seconds and breaks into streaks
@@ -434,8 +442,6 @@ function terrainMaterial(shore: Shore, maxRunup: number): THREE.ShaderMaterial {
           float speck = textureLod(uFoamTex, RH * vWorld.xz / 1.9 + 0.61, 0.0).g;
           stranded *= smoothstep(0.35, 0.6, speck * 0.7 + stranded * 0.4);
         }
-        // Sand right at the waterline is always streaming wet.
-        sheen = max(sheen, smoothstep(-0.5, 0.0, u) * (1.0 - smoothstep(0.5, 1.0, u)));
         albedo *= mix(1.0, 0.55, wet);
         albedo = mix(albedo, vec3(0.88, 0.87, 0.85), stranded * 0.85);
 

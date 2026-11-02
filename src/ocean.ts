@@ -232,13 +232,52 @@ export class Ocean {
           vec3 N = o.normal;
           float uF = offshore(vRest);
           float filmThick = max(vWorld.y - sandHeight(uF), 0.0);
-          // Capillary ripples close by (not on the thin swash film, which is nearly glassy).
-          if (dist < 120.0 && filmThick > 0.25) {
-            vec2 q = vRest * 1.7 + uTime * vec2(0.3, 0.5);
-            float e = 0.15;
-            float n0 = snoise(q);
-            vec2 g = vec2(snoise(q + vec2(e, 0.0)) - n0, snoise(q + vec2(0.0, e)) - n0) / e;
-            N = normalize(N + vec3(-g.x, 0.0, -g.y) * 0.012 * (0.3 + uSea.y * 3.0) * (1.0 - smoothstep(30.0, 120.0, dist)));
+          if (dist < 120.0) {
+            float near = 1.0 - smoothstep(30.0, 120.0, dist);
+            // Capillary ripples, dying away as the water shoals on to the sand.
+            float ripW = smoothstep(0.03, 0.4, filmThick);
+            vec2 g = vec2(0.0);
+            if (ripW > 0.0) {
+              vec2 q = vRest * 1.7 + uTime * vec2(0.3, 0.5);
+              float e = 0.15;
+              float n0 = snoise(q);
+              g = vec2(snoise(q + vec2(e, 0.0)) - n0, snoise(q + vec2(0.0, e)) - n0) / e
+                * 0.012 * (0.3 + uSea.y * 3.0) * ripW;
+            }
+            // The swash sheet is never still: streaks and wrinkles stretched along the flow
+            // ride up the beach with the uprush and back down with the backwash, churned
+            // most behind the front and smoothing to glass only where the sheet is thinnest.
+            // They start a little out to sea so the surf runs into the sheet without a seam.
+            if (uF < 4.0) {
+              float cnt = swashCount(vRest.x, uTime);
+              float n = floor(cnt);
+              float psi = cnt - n;
+              float rise = swashRise(psi);
+              float reach = max(swashReach(vRest.x, n) * rise, swashBase(vRest.x, uTime));
+              float upward = 1.0 - smoothstep(0.22, 0.36, psi);
+              float frac = clamp(-uF / max(reach, 0.01), 0.0, 1.0);
+              float amp = mix(0.5, 1.0, smoothstep(0.0, 0.12, rise)) * (1.0 - smoothstep(0.0, 4.0, uF))
+                * smoothstep(0.02, 0.07, filmThick) * mix(0.6, 1.0 + 0.8 * smoothstep(0.4, 0.85, frac), upward);
+              if (amp > 0.0) {
+                // Flow coordinates: across the streaks, and along them moving with the sheet.
+                // (Nothing here may jump from one swash to the next: the margin of water
+                // between swashes shows it.)
+                vec2 p = vec2(vRest.x / 0.9 + uTime * 0.004, (uF + reach * 0.8) / 4.5);
+                vec2 p2 = vec2(vRest.x / 0.35 - uTime * 0.003, (uF + reach * 0.95) / 1.6 - uTime * 0.07);
+                const float E = 0.02;
+                float s0 = textureLod(uFoamTex, p, 0.0).g;
+                float t0 = textureLod(uFoamTex, p2, 0.0).r;
+                vec2 gs = vec2(
+                  (textureLod(uFoamTex, p + vec2(E, 0.0), 0.0).g - s0) / (E * 0.9),
+                  (textureLod(uFoamTex, p + vec2(0.0, E), 0.0).g - s0) / (E * 4.5));
+                vec2 gt = vec2(
+                  (textureLod(uFoamTex, p2 + vec2(E, 0.0), 0.0).r - t0) / (E * 0.35),
+                  (textureLod(uFoamTex, p2 + vec2(0.0, E), 0.0).r - t0) / (E * 1.6));
+                // Offshore is -z, so a gradient in u is minus one in z.
+                g += (gs * 0.05 + gt * 0.012) * vec2(1.0, -1.0) * amp;
+              }
+            }
+            N = normalize(N + vec3(-g.x, 0.0, -g.y) * near);
           }
           if (dot(N, V) < 0.02) N = normalize(N + V * (0.02 - dot(N, V)));
 
@@ -500,7 +539,7 @@ OceanSample oceanAt(vec2 xz, float footprint, bool full) {
     float psi = cnt - n;
     float rise = swashRise(psi);
     float furthest = swashReach(xz.x, n);
-    float reach = furthest * rise;
+    float reach = max(furthest * rise, swashBase(xz.x, uTime));
     if (u < 0.0) {
       float frac = -u / max(reach, 0.01);
       // A thin film hugging the sloping sand, thinning to nothing at its leading edge.
@@ -531,6 +570,16 @@ OceanSample oceanAt(vec2 xz, float footprint, bool full) {
 
   // A trough can't drain below the seabed: the water thins to a film over it instead.
   if (u >= 0.0 && u < 40.0) disp.y = max(disp.y, sandHeight(offshore(xz + disp.xz)) + 0.03);
+  // The last few metres of sea settle into the foot of the swash sheet, so the surf
+  // runs on into the sheet instead of ending in a step along the still-water line.
+  float settle = uShoreC.z / uShoreB.w * 0.35;
+  if (u >= 0.0 && u < settle) {
+    float w = smoothstep(0.0, settle, u);
+    vec3 foot = vec3(0.0, sandHeight(u) + 0.02 + uShoreC.z * 0.12, 0.0);
+    disp = mix(foot, disp, w);
+    dx = mix(vec3(1.0, 0.0, 0.0), dx, w);
+    dz = mix(vec3(0.0, uShoreB.w, 1.0), dz, w);
+  }
 
   o.disp = disp;
   o.normal = normalize(cross(dz, dx));
