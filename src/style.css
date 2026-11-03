@@ -421,6 +421,58 @@ body.idle * {
   background: #fff6ea;
 }
 
+/* Volume: a slider that pops up above the speaker button. */
+.hud .vol {
+  position: relative;
+  flex: none;
+}
+
+.hud .vol-pop {
+  position: absolute;
+  left: 50%;
+  bottom: 100%;
+  /* The padding bridges the gap to the button so the pointer can move between them. */
+  padding-bottom: 10px;
+  transform: translate(-50%, 6px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.hud .vol:hover .vol-pop,
+.hud .vol:focus-within .vol-pop,
+.hud .vol.open .vol-pop {
+  opacity: 1;
+  transform: translate(-50%, 0);
+  pointer-events: auto;
+}
+
+.hud .vol-pop::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 10px;
+  border-radius: 14px;
+  background: var(--glass);
+  border: 1px solid var(--glass-edge);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.hud .vol-pop {
+  width: 40px;
+  height: 140px;
+}
+
+.hud .vol input[type='range'] {
+  position: absolute;
+  left: 50%;
+  top: calc(50% - 5px);
+  width: 100px;
+  margin: 0;
+  transform: translate(-50%, -50%) rotate(-90deg);
+  background: linear-gradient(90deg, var(--ink) var(--fill, 100%), rgba(251, 243, 234, 0.2) var(--fill, 100%));
+}
+
 /* ---------- captions & toasts ---------- */
 
 .caption {
@@ -535,6 +587,12 @@ body.idle * {
   }
   .hud {
     bottom: 12px;
+    gap: 4px;
+    padding: 8px;
+  }
+  .hud button {
+    width: 34px;
+    height: 34px;
   }
 }
 

@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import { Astro, type SkyState } from './astro';
 import { NIGHT_SKY, SUN_INTENSITY, buildTransmittanceTexture, luminance, skyRadiance, transmittance } from './atmosphere';
+import type { SoundInfo } from './audio';
 import { BirdSystem } from './birds';
 import { CloudPass } from './cloudpass';
 import { CIRRUS, makeClouds } from './clouds';
@@ -31,6 +32,7 @@ export class SunsetScene {
   private mieScale: number;
   private pitch: number;
   private cameraSunVis = 1;
+  private daylight = 1;
   private cameraHorizon: number;
   private moonOn: boolean;
 
@@ -110,6 +112,17 @@ export class SunsetScene {
   }
 
   /** progress: timeline position; time: real seconds; dt: real seconds since last frame. */
+  /** What the soundscape needs to follow the scene. */
+  soundInfo(): SoundInfo {
+    return {
+      surf: this.ocean.surf,
+      shoreDist: this.terrain.shore.dist,
+      flocks: this.birds.flockVoices(),
+      camera: this.camera,
+      daylight: this.daylight,
+    };
+  }
+
   update(progress: number, time: number, dt: number) {
     const s = this.astro.state(progress);
     shared.uTime.value = time;
@@ -127,6 +140,7 @@ export class SunsetScene {
 
     const daylight = THREE.MathUtils.smoothstep(Math.asin(s.sunDir.y), -0.14, -0.02);
     this.birds.update(dt, 0.15 + 0.85 * daylight);
+    this.daylight = daylight;
   }
 
   private updateLight(s: SkyState) {

@@ -60,10 +60,31 @@ export function maxRunup(sea: SeaState): number {
   return 0.05 * Math.sqrt(sea.height * L0) + 0.06;
 }
 
+/** Wave timing and size, for the sound of the surf to follow what's on screen. */
+export interface Surf {
+  /** Main swell: angular frequency, alongshore wavenumber and phase (as uSwashA). */
+  omega: number;
+  ky: number;
+  phase: number;
+  /** Group swell (as uSwashB), which makes some swashes run further than others. */
+  groupOmega: number;
+  groupKy: number;
+  /** Seconds from a crest breaking to its swash starting up the sand. */
+  lead: number;
+  /** Offshore distance (m) where waves break hardest, or -1 if they never break. */
+  breakU: number;
+  height: number;
+  period: number;
+  /** Wind-sea height (m) and whitecap amount. */
+  windHeight: number;
+  whitecaps: number;
+}
+
 export class Ocean {
   readonly mesh: THREE.Mesh;
   /** Swell timing the swash follows, for the sand to know where it has been. */
   readonly swash: { a: THREE.Vector4; b: THREE.Vector4 };
+  readonly surf: Surf;
   private table: THREE.DataTexture;
   private spray: THREE.Points | null;
 
@@ -117,6 +138,8 @@ export class Ocean {
     let foam = 0;
     let breakLo = Infinity;
     let breakHi = -Infinity;
+    let breakMax = 0;
+    let breakJ = -1;
     for (let j = NU - 1; j >= 0; j--) {
       const h = Math.max(seabedDepth(shore, uAt(j)), 0.02);
       const ratio = hsUnc[j] / (GAMMA * h);
@@ -126,6 +149,10 @@ export class Ocean {
       const breaking = Math.min(1, Math.max(0, (ratio - 0.85) / 0.25)) * (1 - 0.65 * Math.min(1, Math.max(0, (ratio - 1.4) / 1.5)));
       if (j < NU - 1) foam *= Math.exp(-(uAt(j + 1) - uAt(j)) / FOAM_DECAY);
       foam = Math.max(foam, breaking);
+      if (breaking > breakMax) {
+        breakMax = breaking;
+        breakJ = j;
+      }
       const approach = Math.min(1, Math.max(0, (ratio - 0.55) / 0.45));
       if (breaking > 0.005) {
         breakLo = Math.min(breakLo, uAt(j));
@@ -174,6 +201,19 @@ export class Ocean {
     };
 
     this.swash = { a: uniforms.uSwashA.value, b: uniforms.uSwashB.value };
+    this.surf = {
+      omega: swellU[2].x,
+      ky: swellU[2].y,
+      phase: swellU[2].z,
+      groupOmega: swellU[4].x,
+      groupKy: swellU[4].y,
+      lead: breakJ >= 0 ? data[(2 * NU + breakJ) * 4] / swellU[2].x : 0,
+      breakU: breakJ >= 0 ? uAt(breakJ) : -1,
+      height: sea.height,
+      period: sea.period,
+      windHeight: sea.windHeight,
+      whitecaps: sea.whitecaps,
+    };
     const material = new THREE.ShaderMaterial({
       uniforms,
       transparent: true,

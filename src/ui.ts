@@ -11,6 +11,8 @@ const ICONS = {
   again: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 12a8 8 0 1 0 2.4-5.7"/><path d="M4 4v4h4"/></svg>',
   settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>',
   share: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>',
+  sound: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></svg>',
+  muted: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/></svg>',
   full: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>',
 };
 
@@ -24,6 +26,8 @@ export interface UIHandlers {
   onSettings: () => void;
   onShare: () => void;
   onScrub: (p: number) => void;
+  onToggleSound: () => void;
+  onVolume: (v: number) => void;
 }
 
 type Key = keyof Omit<Settings, 'seed'>;
@@ -38,6 +42,9 @@ export class UI {
   private phaseLabel: HTMLElement;
   private timeLabel: HTMLElement;
   private pauseBtn: HTMLButtonElement;
+  private soundBtn: HTMLButtonElement;
+  private soundChips!: HTMLElement;
+  private volume: HTMLInputElement;
   private cta: HTMLButtonElement;
   private groups = new Map<Key, HTMLElement>();
   private idleTimer = 0;
@@ -68,6 +75,7 @@ export class UI {
     this.addGroup(opts, 'Birds', 'birds', BIRDS);
     this.addGroup(opts, 'Moon', 'moon', MOONS);
     this.addGroup(opts, 'Pace', 'pace', PACES, true);
+    this.addSoundGroup(opts);
 
     this.panel.querySelector('[data-act=reroll]')!.addEventListener('click', () => h.onReroll());
     this.panel.querySelector('[data-act=surprise]')!.addEventListener('click', () => h.onSurprise());
@@ -88,13 +96,29 @@ export class UI {
       </div>
       <button data-act="again" title="Another sunset, same settings" aria-label="Another sunset">${ICONS.again}</button>
       <button data-act="settings" title="Change the scene" aria-label="Change the scene">${ICONS.settings}</button>
+      <div class="vol">
+        <div class="vol-pop"><input type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume" /></div>
+        <button data-act="sound" title="Sound (M)" aria-label="Mute">${ICONS.sound}</button>
+      </div>
       <button data-act="share" title="Copy a link to this sunset" aria-label="Copy link">${ICONS.share}</button>
       <button data-act="full" title="Fullscreen" aria-label="Fullscreen">${ICONS.full}</button>`;
     this.pauseBtn = this.hud.querySelector('[data-act=pause]') as HTMLButtonElement;
-    this.slider = this.hud.querySelector('input') as HTMLInputElement;
+    this.slider = this.hud.querySelector('.time input') as HTMLInputElement;
     this.phaseLabel = this.hud.querySelector('.phase') as HTMLElement;
     this.timeLabel = this.hud.querySelector('.sun') as HTMLElement;
     this.pauseBtn.addEventListener('click', () => h.onTogglePause());
+    this.soundBtn = this.hud.querySelector('[data-act=sound]') as HTMLButtonElement;
+    this.soundBtn.addEventListener('click', () => h.onToggleSound());
+    // Touch screens can't hover: a tap on the speaker also opens the slider, until a tap elsewhere.
+    const vol = this.hud.querySelector('.vol') as HTMLElement;
+    this.soundBtn.addEventListener('pointerup', (e) => {
+      if (e.pointerType !== 'mouse') vol.classList.add('open');
+    });
+    window.addEventListener('pointerdown', (e) => {
+      if (!vol.contains(e.target as Node)) vol.classList.remove('open');
+    });
+    this.volume = this.hud.querySelector('.vol input') as HTMLInputElement;
+    this.volume.addEventListener('input', () => h.onVolume(Number(this.volume.value)));
     this.hud.querySelector('[data-act=again]')!.addEventListener('click', () => h.onAgain());
     this.hud.querySelector('[data-act=settings]')!.addEventListener('click', () => h.onSettings());
     this.hud.querySelector('[data-act=share]')!.addEventListener('click', () => h.onShare());
@@ -120,9 +144,32 @@ export class UI {
         h.onTogglePause();
       } else if (e.key === 'f') toggleFullscreen();
       else if (e.key === 'r') h.onAgain();
+      else if (e.key === 'm') h.onToggleSound();
       else if (e.key === 'Escape' && !document.fullscreenElement) h.onSettings();
       wake();
     });
+  }
+
+  /** Sound is not part of the scene (or its link): it starts off on every visit. */
+  private addSoundGroup(parent: HTMLElement) {
+    const g = el('div', 'group');
+    g.innerHTML = '<h2 id="g-sound">Sound</h2>';
+    const chips = el('div', 'chips cards');
+    chips.setAttribute('role', 'group');
+    chips.setAttribute('aria-labelledby', 'g-sound');
+    for (const [value, label, hint] of [['on', 'On', 'Surf and birds'], ['off', 'Off', 'Silent']]) {
+      const b = document.createElement('button');
+      b.className = 'chip';
+      b.dataset.value = value;
+      b.innerHTML = `${label}<small>${hint}</small>`;
+      b.addEventListener('click', () => {
+        if (b.getAttribute('aria-pressed') !== 'true') this.h.onToggleSound();
+      });
+      chips.append(b);
+    }
+    g.append(chips);
+    parent.append(g);
+    this.soundChips = chips;
   }
 
   private addGroup(parent: HTMLElement, title: string, key: Key, options: Option<string>[], cards = false) {
@@ -198,6 +245,17 @@ export class UI {
   setPaused(paused: boolean) {
     this.pauseBtn.innerHTML = paused ? ICONS.play : ICONS.pause;
     this.pauseBtn.setAttribute('aria-label', paused ? 'Play' : 'Pause');
+  }
+
+  setSound(on: boolean, volume: number) {
+    if (document.activeElement !== this.volume) this.volume.value = String(volume);
+    const audible = on && volume > 0;
+    this.soundBtn.innerHTML = audible ? ICONS.sound : ICONS.muted;
+    this.soundBtn.setAttribute('aria-label', audible ? 'Mute' : 'Unmute');
+    this.volume.style.setProperty('--fill', `${(on ? volume : 0) * 100}%`);
+    for (const b of this.soundChips.querySelectorAll<HTMLButtonElement>('.chip')) {
+      b.setAttribute('aria-pressed', String((b.dataset.value === 'on') === on));
+    }
   }
 
   setTime(progress: number, phase: string, sunDeg: number) {

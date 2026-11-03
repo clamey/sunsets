@@ -6,6 +6,8 @@ import { type Rng, gauss, range } from './rng';
 import { COMMON_GLSL, shared } from './shared';
 
 const MAX_BIRDS = 240;
+/** Flock ids stay unique across scene rebuilds, so sounds never mix up two flocks. */
+let nextFlockId = 1;
 
 interface Bird {
   offset: THREE.Vector3;
@@ -14,7 +16,11 @@ interface Bird {
   scale: number;
 }
 
+export type FlockKind = 'v' | 'loose' | 'single';
+
 interface Flock {
+  id: number;
+  kind: FlockKind;
   pos: THREE.Vector3;
   vel: THREE.Vector3;
   birds: Bird[];
@@ -107,6 +113,11 @@ export class BirdSystem {
     this.rateAttr.needsUpdate = true;
   }
 
+  /** Where each flock is, for its calls to follow it across the view. */
+  flockVoices(): { id: number; kind: FlockKind; pos: THREE.Vector3; size: number }[] {
+    return this.flocks.map((f) => ({ id: f.id, kind: f.kind, pos: f.pos, size: f.birds.length }));
+  }
+
   private spawn() {
     const rng = this.rng;
     const roll = rng();
@@ -160,6 +171,8 @@ export class BirdSystem {
       }
     }
     this.flocks.push({
+      id: nextFlockId++,
+      kind,
       pos,
       vel,
       birds,

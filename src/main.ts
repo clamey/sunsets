@@ -6,6 +6,7 @@ import {
 } from './config';
 import { Post } from './post';
 import { makeRng, pick, randomSeed } from './rng';
+import { Soundscape } from './audio';
 import { SunsetScene } from './scene';
 import { UI } from './ui';
 
@@ -63,6 +64,28 @@ function start() {
   let lastPhase = '';
   let rebuildTimer = 0;
 
+  // Sound starts off on every visit (browsers won't play it before a click anyway); only
+  // the volume is remembered.
+  const VOLUME_KEY = 'sunsets.volume';
+  const soundOn = false;
+  let volume = 0.8;
+  try {
+    const v = Number(localStorage.getItem(VOLUME_KEY) ?? NaN);
+    if (Number.isFinite(v)) volume = Math.min(1, Math.max(0, v));
+    localStorage.removeItem('sunsets.sound');
+  } catch {
+    // Storage blocked: the default volume it is.
+  }
+  const sound = new Soundscape(soundOn);
+  sound.setVolume(volume);
+  const saveSound = () => {
+    try {
+      localStorage.setItem(VOLUME_KEY, String(volume));
+    } catch {
+      // Storage blocked: the volume lasts for this visit only.
+    }
+  };
+
   const writeUrl = () => history.replaceState(null, '', `${location.pathname}?${settingsToQuery(settings)}`);
 
   const resize = () => {
@@ -108,6 +131,7 @@ function start() {
       lastPhase = '';
       ui.setPaused(false);
       ui.showPlayback();
+      sound.start();
     },
     onTogglePause: () => {
       paused = !paused;
@@ -132,12 +156,32 @@ function start() {
         () => ui.toast('Couldn’t copy. The address bar has the link.'),
       );
     },
+    onToggleSound: () => {
+      const on = !(sound.enabled && volume > 0);
+      // Unmuting from a volume of zero brings it back to something audible.
+      if (on && volume === 0) {
+        volume = 0.5;
+        sound.setVolume(volume);
+      }
+      sound.setEnabled(on);
+      ui.setSound(on, volume);
+      saveSound();
+    },
+    onVolume: (v) => {
+      volume = v;
+      sound.setVolume(v);
+      // Turning the volume up turns the sound on.
+      if (v > 0 && !sound.enabled) sound.setEnabled(true);
+      ui.setSound(sound.enabled, volume);
+      saveSound();
+    },
     onScrub: (p) => {
       progress = p;
       lastPhase = phaseName(world.sunElevationDeg(p));
     },
   });
   ui.sync(settings);
+  ui.setSound(soundOn, volume);
   writeUrl();
 
   if (fixedT !== null && Number.isFinite(fixedT)) {
@@ -162,6 +206,7 @@ function start() {
     }
     world.update(progress, time, dt);
     if (fixedT !== null) (window as unknown as { world: SunsetScene }).world = world;
+    if (fixedT === null) sound.update(time, world.soundInfo());
     world.render(renderer);
     post.render(time);
 
