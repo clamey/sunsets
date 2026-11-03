@@ -273,6 +273,7 @@ export class SandpiperSystem {
           }
         } else if (!leaving && (g.awayFor -= dt) <= 0) {
           // Back from wherever they went, landing somewhere new.
+          g.away = false;
           g.home = range(rng, -8, 8);
           for (const b of g.birds) {
             b.x = g.side * OFFSCREEN + b.lane;
