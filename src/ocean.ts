@@ -662,9 +662,10 @@ const SPRAY_MAX_ROWS = 120;
 const PEEL_MAX = 32;
 
 /**
- * Spray thrown off breaking lips: points anchored on a grid over the surf zone. Each
- * one launches shoreward and up as a breaking crest passes over it, arcs under
- * gravity and fades, so together they form a curtain that runs along with the peel.
+ * Spray thrown off breaking lips: points anchored on a grid over the surf zone. As a
+ * breaking crest passes over an anchor it throws either droplets, which arc shoreward
+ * under gravity as small speckled clusters, or a wisp of mist, which lifts off the crest
+ * and streams back over it on the wind. Together they run along with the peel.
  */
 function makeSpray(uniforms: Record<string, THREE.IUniform>, lo: number, hi: number): THREE.Points | null {
   if (!(hi > lo)) return null;
@@ -707,6 +708,7 @@ function makeSpray(uniforms: Record<string, THREE.IUniform>, lo: number, hi: num
       varying float vAlpha;
       varying vec3 vCol;
       varying vec3 vWorld;
+      varying vec3 vSeed; // noise offset, and 1 for mist, 0 for droplets
       void main() {
         gl_PointSize = 0.0;
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
@@ -723,19 +725,38 @@ function makeSpray(uniforms: Record<string, THREE.IUniform>, lo: number, hi: num
         // Small waves spill quietly; bigger ones throw more.
         float strength = smoothstep(0.03, 0.6, o.breaking) * atCrest * smoothstep(0.4, 1.6, o.height);
         if (strength < 0.03) return;
-        // Each droplet loops through short arcs: up off the lip, forward and down.
-        float life = mix(0.5, 1.2, r2);
-        float t = fract(uTime / life + fract(r1 * 31.7)) * life;
         float H = max(o.height, 0.15);
-        float c = sqrt(9.81 * 2.0 * H);
         vec2 shore = normalize(vec2(shoreDist(x + 0.5) - shoreDist(x - 0.5), 1.0));
-        float vh = c * mix(0.15, 0.6, fract(r1 * 7.7));
-        float vu = mix(0.6, 2.4, fract(r2 * 5.3)) * sqrt(H);
-        vec3 p = vec3(xz.x, 0.0, xz.y) + o.disp
-          + vec3(shore.x, 0.0, shore.y) * vh * t + vec3(0.0, vu * t - 4.9 * t * t, 0.0);
-        if (p.y < o.disp.y - H * 0.6) return;
+        bool mist = fract(r2 * 11.1) < 0.45;
+        float life, t, size;
+        vec3 p = vec3(xz.x, 0.0, xz.y) + o.disp;
+        if (mist) {
+          // Mist lifts off the crest and the wind carries it back over the wave, slowing
+          // and spreading as it goes.
+          life = mix(1.2, 2.2, r2);
+          t = fract(uTime / life + fract(r1 * 31.7)) * life;
+          float windy = smoothstep(0.03, 0.2, uSea.y);
+          float back = mix(0.8, 2.2, fract(r1 * 5.9)) * (0.5 + windy);
+          float rise = mix(0.5, 1.4, fract(r2 * 3.7)) * sqrt(H);
+          float drift = (1.0 - exp(-1.5 * t)) / 1.5;
+          p += vec3(-shore.x, 0.0, -shore.y) * back * drift + vec3(0.0, rise * drift, 0.0);
+          size = mix(0.5, 1.4, fract(r1 * 3.1)) * sqrt(H) * (1.0 + 1.5 * t);
+          vAlpha = 0.07;
+        } else {
+          // Droplets loop through short arcs: up off the lip, forward and down.
+          life = mix(0.5, 1.2, r2);
+          t = fract(uTime / life + fract(r1 * 31.7)) * life;
+          float c = sqrt(9.81 * 2.0 * H);
+          float vh = c * mix(0.15, 0.6, fract(r1 * 7.7));
+          float vu = mix(0.6, 2.4, fract(r2 * 5.3)) * sqrt(H);
+          p += vec3(shore.x, 0.0, shore.y) * vh * t + vec3(0.0, vu * t - 4.9 * t * t, 0.0);
+          if (p.y < o.disp.y - H * 0.6) return;
+          size = mix(0.15, 0.5, fract(r1 * 3.1)) * sqrt(H) * (1.0 + t);
+          vAlpha = 0.3;
+        }
         vWorld = p;
-        vAlpha = strength * smoothstep(0.0, 0.08, t) * (1.0 - smoothstep(life * 0.3, life, t)) * 0.16;
+        vSeed = vec3(fract(r1 * 13.7), fract(r2 * 7.3), mist ? 1.0 : 0.0);
+        vAlpha *= strength * smoothstep(0.0, 0.08, t) * (1.0 - smoothstep(life * 0.3, life, t));
         // Backlit droplets glow; front-lit spray is plain white.
         vec3 v = normalize(p - cameraPosition);
         float g = 0.6, cosT = dot(v, uSunDir);
@@ -743,17 +764,30 @@ function makeSpray(uniforms: Record<string, THREE.IUniform>, lo: number, hi: num
         vCol = 0.9 * (uSunColor * uSunVis * (0.2 + hg * 1.5) + ambientLight(vec3(0.0, 1.0, 0.0)));
         vec4 mv = viewMatrix * vec4(p, 1.0);
         gl_Position = projectionMatrix * mv;
-        float size = mix(0.35, 0.9, fract(r1 * 3.1)) * sqrt(H) * (1.0 + 2.0 * t);
-        gl_PointSize = min(size * uPointScale / max(-mv.z, 0.1), 64.0);
+        gl_PointSize = min(size * uPointScale / max(-mv.z, 0.1), 96.0);
       }`,
     fragmentShader: /* glsl */ `
       ${COMMON_GLSL}
+      uniform sampler2D uFoamTex;
       varying float vAlpha;
       varying vec3 vCol;
       varying vec3 vWorld;
+      varying vec3 vSeed;
       void main() {
-        float d = length(gl_PointCoord - 0.5) * 2.0;
-        float a = vAlpha * exp(-d * d * 3.0) * (1.0 - smoothstep(0.7, 1.0, d));
+        vec2 c = gl_PointCoord - 0.5;
+        float a;
+        if (vSeed.z > 0.5) {
+          // A wisp: flattened along the crest, its edges eaten away by noise.
+          c.y *= 2.4;
+          float d = length(c) * 2.0;
+          float n = texture2D(uFoamTex, c * vec2(0.35, 0.8) + vSeed.xy).r;
+          a = vAlpha * smoothstep(0.0, 0.5, n * 1.6 - d * d) * (1.0 - smoothstep(0.7, 1.0, d));
+        } else {
+          // A cluster of droplets: bright specks, thinning out from the middle.
+          float d = length(c) * 2.0;
+          float n = texture2D(uFoamTex, c * 0.9 + vSeed.xy).a;
+          a = vAlpha * smoothstep(0.55, 0.7, n + 0.25 * (1.0 - d)) * (1.0 - smoothstep(0.6, 1.0, d));
+        }
         if (a < 0.003) discard;
         gl_FragColor = vec4(applyAtmosphere(vCol, vWorld) * uExposure * a, a);
       }`,
