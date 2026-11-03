@@ -5,6 +5,7 @@ export type Swell = 'short' | 'medium' | 'long';
 export type Wind = 'still' | 'breezy' | 'windy';
 export type CloudStyle = 'clear' | 'wispy' | 'puffy' | 'mackerel' | 'dramatic' | 'moody';
 export type Birds = 'none' | 'few' | 'flocks';
+export type Sandpipers = 'none' | 'some' | 'lots';
 export type Moon = 'none' | 'crescent' | 'half' | 'full';
 export type Pace = 'fast' | 'medium' | 'slow';
 
@@ -14,6 +15,7 @@ export interface Settings {
   wind: Wind;
   clouds: CloudStyle;
   birds: Birds;
+  sandpipers: Sandpipers;
   moon: Moon;
   pace: Pace;
   seed: number;
@@ -70,6 +72,12 @@ export const BIRDS: Option<Birds>[] = [
   { value: 'flocks', label: 'Flocks' },
 ];
 
+export const SANDPIPERS: Option<Sandpipers>[] = [
+  { value: 'none', label: 'None' },
+  { value: 'some', label: 'Some' },
+  { value: 'lots', label: 'A lot' },
+];
+
 export const MOONS: Option<Moon>[] = [
   { value: 'none', label: 'None' },
   { value: 'crescent', label: 'Crescent' },
@@ -92,6 +100,7 @@ export const DEFAULT_SETTINGS: Settings = {
   wind: 'breezy',
   clouds: 'wispy',
   birds: 'few',
+  sandpipers: 'some',
   moon: 'crescent',
   pace: 'fast',
   seed: 1,
@@ -103,6 +112,7 @@ const KEYS: Record<keyof Omit<Settings, 'seed'>, readonly Option<string>[]> = {
   wind: WINDS,
   clouds: CLOUDS,
   birds: BIRDS,
+  sandpipers: SANDPIPERS,
   moon: MOONS,
   pace: PACES,
 };

@@ -9,9 +9,10 @@ import { CIRRUS, makeClouds } from './clouds';
 import { SWELL_PERIOD, type Settings, WAVE_HEIGHT, WIND_SEA } from './config';
 import { Ocean, type SeaState, maxRunup } from './ocean';
 import { makeRng, range } from './rng';
+import { SandpiperSystem } from './sandpipers';
 import { shared } from './shared';
 import { SkyLUT, makeSkyDome } from './sky';
-import { Terrain } from './terrain';
+import { SwashEdge, Terrain } from './terrain';
 
 const EYE_HEIGHT = 1.7;
 
@@ -25,6 +26,7 @@ export class SunsetScene {
   /** 0..1: how much cloud there is to catch the low sun. */
   private cloudiness = 0;
   private birds: BirdSystem;
+  private pipers: SandpiperSystem;
   private skyLUT: SkyLUT;
   private dome: ReturnType<typeof makeSkyDome>;
   private clouds: CloudPass;
@@ -79,6 +81,10 @@ export class SunsetScene {
 
     this.birds = new BirdSystem(sub(5), settings.birds);
     this.scene.add(this.birds.mesh);
+
+    const edge = new SwashEdge(this.terrain.shore, maxRunup(sea), this.ocean.swash);
+    this.pipers = new SandpiperSystem(sub(7), settings.sandpipers, this.terrain.shore, edge);
+    this.scene.add(this.pipers.mesh);
 
     const eye = this.terrain.cameraGround + EYE_HEIGHT;
     this.camera = new THREE.PerspectiveCamera(50, 1, 0.5, 200000);
@@ -140,6 +146,7 @@ export class SunsetScene {
 
     const daylight = THREE.MathUtils.smoothstep(Math.asin(s.sunDir.y), -0.14, -0.02);
     this.birds.update(dt, 0.15 + 0.85 * daylight);
+    this.pipers.update(time, dt, daylight, this.cameraSunVis);
     this.daylight = daylight;
   }
 
@@ -212,6 +219,7 @@ export class SunsetScene {
     this.terrain.dispose();
     this.ocean.dispose();
     this.birds.dispose();
+    this.pipers.dispose();
     this.skyLUT.target.dispose();
     this.clouds.dispose();
     (this.dome.mesh.material as THREE.Material).dispose();

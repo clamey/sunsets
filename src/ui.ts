@@ -1,6 +1,6 @@
 // DOM for the setup panel, playback controls, captions and toasts.
 import {
-  BIRDS, CLOUDS, MOONS, PACES, SWELLS, WAVES, WINDS, type Option, type Settings,
+  BIRDS, CLOUDS, MOONS, PACES, SANDPIPERS, SWELLS, WAVES, WINDS, type Option, type Settings,
 } from './config';
 
 const ICONS = {
@@ -73,6 +73,7 @@ export class UI {
     this.addGroup(opts, 'Wind', 'wind', WINDS, true);
     this.addGroup(opts, 'Clouds', 'clouds', CLOUDS, true);
     this.addGroup(opts, 'Birds', 'birds', BIRDS);
+    this.addGroup(opts, 'Sandpipers', 'sandpipers', SANDPIPERS);
     this.addGroup(opts, 'Moon', 'moon', MOONS);
     this.addGroup(opts, 'Pace', 'pace', PACES, true);
     this.addSoundGroup(opts);

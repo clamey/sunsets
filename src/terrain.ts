@@ -143,6 +143,74 @@ export function shoreUniforms(s: Shore, maxRunup: number) {
   };
 }
 
+/**
+ * CPU twin of the swash functions in SHORE_GLSL, for things on the beach that have to
+ * keep out of the water. Reads the same noise texture and swell timing the shaders do.
+ */
+export class SwashEdge {
+  private tex: Uint8Array;
+  constructor(
+    private shore: Shore,
+    private maxRunup: number,
+    private swash: { a: THREE.Vector4; b: THREE.Vector4 },
+  ) {
+    this.tex = cloudNoise().tex2.image.data as Uint8Array;
+  }
+
+  /** Bilinear, repeating lookup of one channel of the foam texture, like textureLod(..., 0). */
+  private foam(u: number, v: number, c: number): number {
+    const N = 256;
+    const fx = u * N - 0.5;
+    const fy = v * N - 0.5;
+    const i = Math.floor(fx);
+    const j = Math.floor(fy);
+    const tx = fx - i;
+    const ty = fy - j;
+    const w = (k: number) => ((k % N) + N) % N;
+    const i0 = w(i), i1 = w(i + 1), j0 = w(j), j1 = w(j + 1);
+    const d = this.tex;
+    const at = (x: number, y: number) => d[(y * N + x) * 4 + c];
+    return lerp(lerp(at(i0, j0), at(i1, j0), tx), lerp(at(i0, j1), at(i1, j1), tx), ty) / 255;
+  }
+
+  private offset(x: number) {
+    return (this.foam(x / 170 + 0.11, 0.37, 0) - 0.5) * 0.12;
+  }
+
+  private count(x: number, t: number) {
+    const a = this.swash.a;
+    return (1.5708 - (a.y * x - a.x * t + a.z)) / 6.2832 + this.offset(x);
+  }
+
+  private static rise(psi: number) {
+    return psi < 0.3 ? Math.sin((psi / 0.3) * 1.5708) : psi < 0.92 ? Math.pow(1 - (psi - 0.3) / 0.62, 1.6) : 0;
+  }
+
+  private reach(x: number, n: number) {
+    const { a, b } = this.swash;
+    const wPeak = 6.2832 * (n + 0.3 - this.offset(x)) - 1.5708 + a.y * x + a.z;
+    const group = 0.65 + 0.35 * Math.sin(b.y * x * 0.5 - (b.x / a.x - 1) * wPeak + 1.3);
+    const lobes = 0.4 + 0.9 * clamp((this.foam(x / 45 + n * 0.618, n * 0.37, 1) - 0.3) / 0.45, 0, 1);
+    const tongues = 0.75 + 0.5 * clamp((this.foam(x / 11 - n * 0.41, 0.53 + n * 0.29, 1) - 0.3) / 0.45, 0, 1);
+    const fingers = 1 + 0.8 * (this.foam(x / 40 + n * 0.29, 0.21 + n * 0.53, 3) - 0.5);
+    const cusps = 1 + 0.14 * Math.sin((x * 6.2832) / 26 + 1.7 + 0.6 * Math.sin(x / 61));
+    return (this.maxRunup * group * lobes * tongues * fingers * cusps) / this.shore.foreshore;
+  }
+
+  private base(x: number, t: number) {
+    const a = this.foam(x / 23 + t * 0.006, 0.83 + t * 0.011, 1);
+    const b = this.foam(x / 5 - t * 0.017, 0.17 + t * 0.023, 2);
+    return (this.maxRunup / this.shore.foreshore) * (0.04 + 0.22 * clamp(a * 1.6 - 0.4, 0, 1) + 0.06 * b);
+  }
+
+  /** How far up the beach (m from the still-water line) the water reaches at x, time t. */
+  at(x: number, t: number): number {
+    const cnt = this.count(x, t);
+    const n = Math.floor(cnt);
+    return Math.max(this.reach(x, n) * SwashEdge.rise(cnt - n), this.base(x, t));
+  }
+}
+
 const mix3 = (a: RGB, b: RGB, t: number): RGB => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
 const srgb = (hex: number): RGB => {
   const c = new THREE.Color(hex);

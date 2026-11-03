@@ -1,7 +1,7 @@
 import './style.css';
 import * as THREE from 'three';
 import {
-  BIRDS, DEFAULT_SETTINGS, MOONS, PACE_SECONDS, SWELLS, WAVES, WINDS, type CloudStyle, type Settings,
+  BIRDS, DEFAULT_SETTINGS, MOONS, PACE_SECONDS, SANDPIPERS, SWELLS, WAVES, WINDS, type CloudStyle, type Settings,
   settingsFromQuery, settingsToQuery,
 } from './config';
 import { Post } from './post';
@@ -32,6 +32,7 @@ function surprise(current: Settings): Settings {
     wind: pick(rng, WINDS).value,
     clouds,
     birds: pick(rng, BIRDS).value,
+    sandpipers: pick(rng, SANDPIPERS).value,
     moon: pick(rng, MOONS).value,
     seed: randomSeed(),
   };
