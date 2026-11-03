@@ -43,7 +43,10 @@ interface Piper {
   roam: number;
   fidget: number;
   stride: number;
+  /** A probing bout: time left, its length, and how many jabs at the sand. */
   peckT: number;
+  peckLen: number;
+  jabs: number;
   nextPeck: number;
   scale: number;
   /** Height above the sand (m) while flying. */
@@ -94,10 +97,11 @@ function piperGeometry(): THREE.BufferGeometry {
   const leg: number[] = [];
   const wing: number[] = [];
   const legP: number[] = [];
+  const head: number[] = [];
   const BACK = [0.6, 0.57, 0.52];
   const BELLY = [0.93, 0.92, 0.9];
   const DARK = [0.05, 0.045, 0.04];
-  const blob = (sx: number, sy: number, sz: number, cx: number, cy: number, tilt: number) => {
+  const blob = (sx: number, sy: number, sz: number, cx: number, cy: number, tilt: number, isHead: number) => {
     const g = new THREE.SphereGeometry(1, 8, 6).toNonIndexed();
     const p = g.getAttribute('position');
     const c = Math.cos(tilt), s = Math.sin(tilt);
@@ -108,11 +112,12 @@ function piperGeometry(): THREE.BufferGeometry {
       leg.push(0);
       wing.push(0, 0, 0);
       legP.push(0, 0, 0);
+      head.push(isHead);
     }
     g.dispose();
   };
-  blob(0.085, 0.032, 0.03, -0.01, LEG + 0.03, 0.12); // body, tail a little low
-  blob(0.021, 0.02, 0.019, 0.07, LEG + 0.058, 0); // head
+  blob(0.085, 0.032, 0.03, -0.01, LEG + 0.03, 0.12, 0); // body, tail a little low
+  blob(0.021, 0.02, 0.019, 0.07, LEG + 0.058, 0, 1); // head
   // Beak: a thin black wedge.
   const bx = 0.086, by = LEG + 0.055;
   for (const [a, b, c] of [
@@ -126,6 +131,7 @@ function piperGeometry(): THREE.BufferGeometry {
       leg.push(0);
       wing.push(0, 0, 0);
       legP.push(0, 0, 0);
+      head.push(1);
     }
   }
   // Legs: two thin segments each, hip to ankle to foot, posed in the vertex shader. As
@@ -139,6 +145,7 @@ function piperGeometry(): THREE.BufferGeometry {
         leg.push(side);
         wing.push(0, 0, 0);
         legP.push(seg, t, a);
+        head.push(0);
       }
     }
   }
@@ -152,6 +159,7 @@ function piperGeometry(): THREE.BufferGeometry {
       leg.push(0);
       wing.push(a, c, side);
       legP.push(0, 0, 0);
+      head.push(0);
     }
   }
   const g = new THREE.BufferGeometry();
@@ -160,6 +168,7 @@ function piperGeometry(): THREE.BufferGeometry {
   g.setAttribute('aLeg', new THREE.Float32BufferAttribute(leg, 1));
   g.setAttribute('aWing', new THREE.Float32BufferAttribute(wing, 3));
   g.setAttribute('aLegP', new THREE.Float32BufferAttribute(legP, 3));
+  g.setAttribute('aHead', new THREE.Float32BufferAttribute(head, 1));
   g.computeVertexNormals();
   return g;
 }
@@ -169,6 +178,7 @@ export class SandpiperSystem {
   private groups: Group[] = [];
   private placed = false;
   private animAttr: THREE.InstancedBufferAttribute;
+  private peckAttr: THREE.InstancedBufferAttribute;
   private m = new THREE.Matrix4();
   private q = new THREE.Quaternion();
   private e = new THREE.Euler(0, 0, 0, 'YXZ');
@@ -184,6 +194,8 @@ export class SandpiperSystem {
     const geo = piperGeometry();
     this.animAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_PIPERS * 4), 4);
     geo.setAttribute('iAnim', this.animAttr);
+    this.peckAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_PIPERS * 2), 2);
+    geo.setAttribute('iPeck', this.peckAttr);
     this.mesh = new THREE.InstancedMesh(geo, piperMaterial(), MAX_PIPERS);
     this.mesh.count = 0;
     this.mesh.frustumCulled = false;
@@ -218,6 +230,8 @@ export class SandpiperSystem {
           fidget: range(rng, 0, 6),
           stride: rng() * 6.28,
           peckT: 0,
+          peckLen: 1,
+          jabs: 1,
           nextPeck: range(rng, 0.2, 1.5),
           scale: range(rng, 0.95, 1.15),
           alt: 0,
@@ -370,7 +384,7 @@ export class SandpiperSystem {
           if (!b.hop) {
             // Following the water down, each stops now and then to probe the sand, and one
             // busy pecking finishes before it carries on.
-            if (dUp < -0.1 && b.peckT <= 0 && rng() < dt * 1.2) b.peckT = 0.35 + range(rng, 0, 0.5);
+            if (dUp < -0.1 && b.peckT <= 0 && rng() < dt * 1.2) this.probe(b, 1 + Math.floor(rng() * 3));
             // It stays put until it's a fair way off its spot (each its own way), then runs
             // until it's nearly there: stop-start, not smooth tracking.
             const off = Math.abs(dUp) > (b.running ? 0.1 : b.slack) || water + 0.3 > b.up;
@@ -408,36 +422,47 @@ export class SandpiperSystem {
         // Legs whirr when running; standing still, they probe the wet sand.
         const run = airborne ? 0 : smoothstep(0.05, 0.4, speed);
         b.stride += dt * Math.min(speed / 0.1, 13) * Math.PI * 2;
-        let peck = 0;
+        // Probing: the body tips forward from the hips while the legs stay put, and the
+        // head jabs the bill into the sand a few times in quick succession.
+        let tilt = 0, jab = 0;
         if (!airborne && speed < 0.1) {
           b.nextPeck -= dt;
           if (b.nextPeck <= 0 && b.peckT <= 0) {
-            b.peckT = 0.35;
-            b.nextPeck = range(rng, 0.25, 1.6);
+            this.probe(b, 1 + Math.floor(rng() * 5));
+            b.nextPeck = range(rng, 0.3, 2);
           }
         }
         if (b.peckT > 0) {
           b.peckT -= dt;
-          // A longer stop is a pause, then the peck.
-          peck = b.peckT < 0.35 ? Math.sin(Math.PI * (1 - Math.max(b.peckT, 0) / 0.35)) : 0;
+          const done = b.peckLen - b.peckT;
+          tilt = smoothstep(0, 0.12, done) * smoothstep(0, 0.12, b.peckT);
+          const k = clamp((done - 0.1) / 0.16, 0, b.jabs);
+          jab = tilt * (0.4 + 0.6 * (0.5 - 0.5 * Math.cos(2 * Math.PI * k)));
         }
 
         if (Math.abs(b.x) > 45 || n >= MAX_PIPERS) continue;
         const ground = Math.max(b.up, 0) * this.shore.foreshore;
         const bob = Math.abs(Math.sin(b.stride)) * 0.008 * run;
         this.p.set(b.x, ground + bob + b.alt, -shoreline(this.shore, b.x) + b.up);
-        this.e.set(0, b.heading, -0.75 * peck);
+        this.e.set(0, b.heading, 0);
         this.q.setFromEuler(this.e);
         this.s.setScalar(b.scale);
         this.m.compose(this.p, this.q, this.s);
         this.mesh.setMatrixAt(n, this.m);
         this.animAttr.setXYZW(n, b.stride, run, b.fly, b.flap);
+        this.peckAttr.setXY(n, tilt, jab);
         n++;
       }
     }
     this.mesh.count = n;
     this.mesh.instanceMatrix.needsUpdate = true;
     this.animAttr.needsUpdate = true;
+    this.peckAttr.needsUpdate = true;
+  }
+
+  private probe(b: Piper, jabs: number) {
+    b.jabs = jabs;
+    b.peckLen = b.peckT = 0.2 + jabs * 0.16 + range(this.rng, 0, 0.15);
   }
 
   private takeoff(g: Group, x1: number, away: boolean) {
@@ -470,10 +495,16 @@ function piperMaterial(): THREE.ShaderMaterial {
       attribute float aLeg;
       attribute vec3 aWing;
       attribute vec3 aLegP;
+      attribute float aHead;
+      attribute vec2 iPeck; // body tipped forward, head down
       attribute vec4 iAnim; // stride phase, how much it's running, wings spread, wingbeat phase
       varying vec3 vWorld;
       varying vec3 vNormal;
       varying vec3 vColor;
+      vec2 rot(vec2 v, float a) {
+        float c = cos(a), s = sin(a);
+        return vec2(c * v.x - s * v.y, s * v.x + c * v.y);
+      }
       void main() {
         vec3 p = position;
         vec3 nrm = normal;
@@ -507,6 +538,18 @@ function piperMaterial(): THREE.ShaderMaterial {
           vec3 spread = vec3(-c - a * 0.15, a * sin(ang), aWing.z * (0.02 + a * cos(ang)));
           p = vec3(0.01, ${(LEG + 0.048).toFixed(3)}, 0.0) + mix(folded, spread, iAnim.z);
           nrm = normalize(mix(vec3(0.0, 1.0, 0.0), vec3(0.0, cos(ang), -aWing.z * sin(ang)), iAnim.z));
+        }
+        if (aLeg == 0.0) {
+          // Probing: the head and bill drop from the neck, and the body tips forward from
+          // the hips, which stay over the planted feet.
+          if (aHead > 0.5) {
+            vec2 neck = vec2(0.055, ${(LEG + 0.045).toFixed(3)});
+            p.xy = neck + rot(p.xy - neck, -0.85 * iPeck.y);
+            nrm.xy = rot(nrm.xy, -0.85 * iPeck.y);
+          }
+          vec2 hip = vec2(0.0, ${(LEG + 0.01).toFixed(3)});
+          p.xy = hip + rot(p.xy - hip, -0.5 * iPeck.x);
+          nrm.xy = rot(nrm.xy, -0.5 * iPeck.x);
         }
         vec4 wp = modelMatrix * instanceMatrix * vec4(p, 1.0);
         vWorld = wp.xyz;
