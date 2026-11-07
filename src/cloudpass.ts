@@ -35,6 +35,12 @@ float hgRel(float c, float g) { float g2 = g * g; return (1.0 - g2) / pow(1.0 + 
 
 vec4 n2(vec2 uv) { return textureLod(uNoise2D, uv, 0.0); }
 
+// Noise texels per pixel at unit frequency for the layer being marched (log2). Far off,
+// fine detail is smaller than a pixel; read it from a blurrier mip, or it aliases into
+// evenly ruled stripes toward the horizon.
+float gFp = 0.0;
+vec4 n2f(vec2 uv, float freq) { return textureLod(uNoise2D, uv, clamp(gFp + log2(freq) - 1.5, 0.0, 8.0)); }
+
 // Horizontal coverage in [0, 1] at wind-shifted position w (km).
 float coverageAt(vec2 w, vec4 A, vec4 B, vec4 C) {
   vec2 wd = vec2(cos(C.w), sin(C.w));
@@ -54,10 +60,11 @@ float coverageAt(vec2 w, vec4 A, vec4 B, vec4 C) {
     vec2 big = n2(mat2(0.6, 0.8, -0.8, 0.6) * uv * 0.071 + 0.23).rb - 0.5;
     vec2 wob = n2(uv * 0.5 + ev).rb - 0.5;
     vec2 u2 = vec2(uv.x * 3.2, uv.y * 1.4) + wob * 0.5 + big * 4.0;
-    vec4 a = n2(u2 + ev);
-    float cells = a.g;
+    vec4 a = n2f(u2 + ev, 3.2);
+    // A blurrier mip has less contrast; stretch it back so as much sky stays cloudy.
+    float cells = 0.5 + (a.g - 0.5) * (1.0 + 0.15 * clamp(gFp + log2(3.2) - 1.5, 0.0, 8.0));
     float rows = 0.5 + 0.5 * sin((uv.x * 9.0 + wob.y * 2.5 + big.x * 14.0) * 6.2832);
-    rows = mix(0.5, rows, smoothstep(-0.15, 0.2, big.y));
+    rows = mix(0.5, rows, smoothstep(-0.15, 0.2, big.y) * (1.0 - smoothstep(3.2, 4.8, gFp)));
     vec4 b = n2(uv * 0.22 - ev * 0.3 + 0.5 + big * 0.8);
     c = (cells * 0.8 + a.r * 0.15 + rows * 0.3 - 0.17) * mix(0.45, 1.15, smoothstep(0.3, 0.65, b.r));
   } else {
@@ -169,6 +176,7 @@ void main() {
       lT = 1.0 - alpha;
     } else {
       // Volumetric slab.
+      gFp = log2(max(t0 * uPixAng / max(dir.y, 0.03) / (B.y * 8.0) * 256.0, 1e-4));
       float rt = rb + A.y;
       float t1 = -b + sqrt(b * b - (r0 * r0 - rt * rt));
       // Steps sized to the slab, so shallow rays through distant clouds aren't undersampled.
