@@ -536,6 +536,9 @@ function terrainMaterial(shore: Shore, maxRunup: number): THREE.ShaderMaterial {
           float F = 0.02 + 0.98 * pow(1.0 - max(dot(wn, V), 0.0), 5.0);
           float glint = exp(-(1.0 - max(dot(R, uSunDir), 0.0)) / mix(0.004, 0.0008, sheen));
           vec3 g = uSunColor * vis * glint * 1.5;
+          // The moon's path carries on up the film too, rather than ending at the water.
+          float moonGlint = exp(-(1.0 - max(dot(R, uMoonDir), 0.0)) / mix(0.004, 0.0008, sheen));
+          g += vec3(0.85, 0.9, 1.0) * 0.0004 * uMoonBright * moonGlint * mix(6.0, 40.0, sheen);
           float gm = max(g.r, max(g.g, g.b)) * uExposure;
           g *= gm > 8.0 ? 8.0 / gm : 1.0;
           col = mix(col, skyReflection(R) * 0.8 + g, shine * F);

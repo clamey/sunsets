@@ -272,6 +272,8 @@ export class Ocean {
           vec3 N = o.normal;
           float uF = offshore(vRest);
           float filmThick = max(vWorld.y - sandHeight(uF), 0.0);
+          vec2 gw = vec2(0.0);
+          vec2 gwFine = vec2(0.0);
           if (dist < 120.0) {
             float near = 1.0 - smoothstep(30.0, 120.0, dist);
             // Capillary ripples, dying away as the water shoals on to the sand.
@@ -314,10 +316,14 @@ export class Ocean {
                   (textureLod(uFoamTex, p2 + vec2(E, 0.0), 0.0).r - t0) / (E * 0.35),
                   (textureLod(uFoamTex, p2 + vec2(0.0, E), 0.0).r - t0) / (E * 1.6));
                 // Offshore is -z, so a gradient in u is minus one in z.
-                g += (gs * 0.05 + gt * 0.012) * vec2(1.0, -1.0) * amp;
+                gw = gs * 0.05 * vec2(1.0, -1.0) * amp;
+                gwFine = gt * 0.012 * vec2(1.0, -1.0) * amp;
               }
             }
-            N = normalize(N + vec3(-g.x, 0.0, -g.y) * near);
+            gw *= near;
+            gwFine *= near;
+            g *= near;
+            N = normalize(N + vec3(-g.x - gw.x - gwFine.x, 0.0, -g.y - gw.y - gwFine.y));
           }
           if (dot(N, V) < 0.02) N = normalize(N + V * (0.02 - dot(N, V)));
 
@@ -327,10 +333,18 @@ export class Ocean {
           vec3 refl = skyReflection(R);
 
           // Sun and moon glitter, with roughness from waves too small to see.
-          float s2 = 0.0015 + o.slopeVar + uSea.y * 0.01;
-          vec3 glitter = uSunColor * uSunVis * microfacet(N, V, uSunDir, s2) * F;
+          // The swash sheet's streaks are steep, and a mirror-sharp lobe on them turns the
+          // sun or moon path into a spray of hard white flecks where it reaches the sand.
+          // Its glints see the broad streaks only gently and the fine wrinkles (smaller than
+          // a pixel out where the path is, so they'd alias into a crumbly mosaic) not at
+          // all: both mostly roughen the lobe, and the path carries on across the sheet,
+          // broken up and spreading a little, as it does on real swash.
+          float s2 = 0.0015 + o.slopeVar + uSea.y * 0.01 + dot(gw, gw) * 0.25 + dot(gwFine, gwFine) * 0.5;
+          vec3 Ng = normalize(N + vec3(gw.x * 0.85 + gwFine.x, 0.0, gw.y * 0.85 + gwFine.y));
+          if (dot(Ng, V) < 0.02) Ng = normalize(Ng + V * (0.02 - dot(Ng, V)));
+          vec3 glitter = uSunColor * uSunVis * microfacet(Ng, V, uSunDir, s2) * F;
           vec3 moonIrr = vec3(0.85, 0.9, 1.0) * 0.0004 * uMoonBright;
-          glitter += moonIrr * microfacet(N, V, uMoonDir, s2) * F;
+          glitter += moonIrr * microfacet(Ng, V, uMoonDir, s2) * F;
           // Soft knee: tame the brightest glints for bloom while keeping the variation
           // across wave faces (a hard ceiling flattens the whole sunward sea into a sheet).
           float gl = max(glitter.r, max(glitter.g, glitter.b)) * uExposure;
