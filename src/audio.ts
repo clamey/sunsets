@@ -2,6 +2,7 @@
 // Everything is synthesised with Web Audio; nothing is downloaded.
 import * as THREE from 'three';
 import type { FlockKind } from './birds';
+import { renderGullPhrase } from './gullcall';
 import type { Surf } from './ocean';
 
 export interface SoundInfo {
@@ -77,6 +78,8 @@ export class Soundscape {
   private caps!: GainNode;
   private surf: SurfVoice[] = [];
   private birds = new Map<number, BirdVoice>();
+  /** Gull phrases rendered ahead of time; one is re-rendered in idle time after each use. */
+  private gulls: AudioBuffer[] = [];
   private hidden = false;
   private volume = 1;
   private v = new THREE.Vector3();
@@ -356,36 +359,33 @@ export class Soundscape {
     o.stop(t0 + 0.1);
   }
 
-  /** A gull's drawn-out "kee-ow", sometimes followed by a few short calls. */
-  private cry(dest: AudioNode, t0: number) {
-    const ctx = this.ctx!;
-    const call = (start: number, f0: number, peakF: number, endF: number, dur: number, level: number) => {
-      const o = ctx.createOscillator();
-      o.type = 'sawtooth';
-      o.frequency.setValueAtTime(f0, start);
-      o.frequency.linearRampToValueAtTime(peakF, start + dur * 0.2);
-      o.frequency.linearRampToValueAtTime(endF, start + dur);
-      const lfo = ctx.createOscillator();
-      lfo.frequency.value = 13 + Math.random() * 4;
-      const depth = ctx.createGain();
-      depth.gain.value = peakF * 0.02;
-      lfo.connect(depth).connect(o.frequency);
-      const bp = ctx.createBiquadFilter();
-      bp.type = 'bandpass';
-      bp.frequency.value = 1500;
-      bp.Q.value = 0.9;
-      const g = this.envelope(start, 0.04, dur * 0.45, dur * 0.5, level);
-      o.connect(bp).connect(g).connect(dest);
-      o.start(start);
-      lfo.start(start);
-      o.stop(start + dur + 0.05);
-      lfo.stop(start + dur + 0.05);
+  private gullPhrase(): AudioBuffer {
+    // Rendered at a low rate (the voice has nothing above 9 kHz) to keep it cheap.
+    const rate = 22050;
+    const buf = (data: Float32Array) => {
+      const b = this.ctx!.createBuffer(1, data.length, rate);
+      b.copyToChannel(data as Float32Array<ArrayBuffer>, 0);
+      return b;
     };
-    const f = 0.9 + Math.random() * 0.25;
-    call(t0, 750 * f, 1400 * f, 640 * f, 0.5 + Math.random() * 0.2, 0.16);
-    if (Math.random() < 0.4) {
-      const n = 2 + Math.floor(Math.random() * 3);
-      for (let i = 0; i < n; i++) call(t0 + 0.75 + i * 0.2, 1000 * f, 1200 * f, 950 * f, 0.13, 0.11);
-    }
+    while (this.gulls.length < 2) this.gulls.push(buf(renderGullPhrase(rate, Math.random)));
+    const i = Math.floor(Math.random() * this.gulls.length);
+    const phrase = this.gulls[i];
+    const refill = () => {
+      const fresh = buf(renderGullPhrase(rate, Math.random));
+      if (this.gulls.length < 6) this.gulls.push(fresh);
+      else this.gulls[i] = fresh;
+    };
+    if ('requestIdleCallback' in window) requestIdleCallback(refill, { timeout: 2000 });
+    else setTimeout(refill, 200);
+    return phrase;
+  }
+
+  /** A gull's cry: a "kee-ow", a long call or a laugh, each bird a little higher or lower. */
+  private cry(dest: AudioNode, t0: number) {
+    const src = this.ctx!.createBufferSource();
+    src.buffer = this.gullPhrase();
+    src.playbackRate.value = 0.9 + Math.random() * 0.2;
+    src.connect(dest);
+    src.start(t0);
   }
 }
